@@ -61,6 +61,7 @@ def main(
         record_transitions=False,
         seed=0,
         anchor_obs=cfg["env"].get("anchor_obs", False),
+        robot=cfg["env"].get("robot", "g1"),
         debug_vis=ghost,
     )
     env = RslRlVecEnvWrapper(make_env(args, device=device))

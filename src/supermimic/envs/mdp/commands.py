@@ -29,6 +29,7 @@ from mjlab.utils.lab_api.math import (
 )
 
 from supermimic.envs.mdp.motion_library import MotionLibrary
+from supermimic.robots import get_robot
 
 if TYPE_CHECKING:
     from mjlab.entity import Entity
@@ -54,6 +55,7 @@ class MultiClipMotionCommand(CommandTerm):
         self.library = MotionLibrary(
             cfg.npz_files, cfg.body_names, default_joint_pos, device=self.device, bin_frames=cfg.bin_frames,
             compact=cfg.compact_library, store_dtype=torch.float16 if cfg.library_fp16 else torch.float32,
+            root_body_name=cfg.root_body_name, fk_model=get_robot(cfg.robot).load_model() if cfg.compact_library else None,
         )
         print(f"[INFO] {self.library.summary()}")
         lib = self.library
@@ -397,6 +399,7 @@ class MultiClipMotionCommand(CommandTerm):
 @dataclass(kw_only=True)
 class MultiClipMotionCommandCfg(CommandTermCfg):
     npz_files: list[str]
+    robot: str = "g1"  # supermimic.robots.get_robot (compact-mode FK model)
     anchor_body_name: str
     root_body_name: str = "pelvis"
     body_names: tuple[str, ...]

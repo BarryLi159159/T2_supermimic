@@ -11,14 +11,19 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from supermimic.config import TrainConfig
-from supermimic.data.motion_convert import load_g1_model
 from supermimic.envs import SuperMimicEnvCfgArgs, make_env
 from supermimic.envs.mdp.motion_library import discover_npz
-from supermimic.envs.tracking_env_cfg import ANCHOR_BODY, ROOT_BODY, TRACKED_BODIES
 from supermimic.imagination.policy_trainer import PolicyTrainer
 from supermimic.kinematics.g1_fk import G1Kinematics
 from supermimic.policy.nets import Critic, Policy
-from supermimic.training.distributed import allreduce_mean, broadcast_params, finalize, init_distributed, world_size
+from supermimic.robots import get_robot
+from supermimic.training.distributed import (
+    allreduce_mean,
+    broadcast_params,
+    finalize,
+    init_distributed,
+    world_size,
+)
 from supermimic.training.schedule import cosine_lr
 from supermimic.world_model.heads import AnalyticHeads
 from supermimic.world_model.wm_trainer import WorldModelTrainer
@@ -56,6 +61,7 @@ class Trainer:
         self.env = make_env(
             SuperMimicEnvCfgArgs(
                 npz_files=[str(f) for f in files],
+                robot=cfg.env.robot,
                 num_envs=cfg.env.num_envs,
                 future_frames=cfg.env.future_frames,
                 episode_length_s=cfg.env.episode_length_s,
@@ -78,8 +84,9 @@ class Trainer:
         self.buffer = self.recorder.buffer
         robot = env.scene["robot"]
 
-        fk = G1Kinematics(load_g1_model(), device=self.device)
-        heads = AnalyticHeads(fk, TRACKED_BODIES, ANCHOR_BODY, ROOT_BODY, robot.data.soft_joint_pos_limits[0].clone(), robot.data.default_joint_pos[0].clone())
+        spec = get_robot(cfg.env.robot)
+        fk = G1Kinematics(spec.load_model(), device=self.device)
+        heads = AnalyticHeads(fk, spec.tracked_bodies, spec.anchor_body, spec.root_body, robot.data.soft_joint_pos_limits[0].clone(), robot.data.default_joint_pos[0].clone())
         self.wm = WorldModel(cfg.world_model, heads, self.device)
         self.policy = Policy(cfg.policy).to(self.device)
         self.critic = Critic(cfg.critic, pcfg=cfg.policy).to(self.device)

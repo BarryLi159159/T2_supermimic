@@ -8,6 +8,7 @@ import torch
 from supermimic.data.motion_convert import load_g1_model
 from supermimic.kinematics.g1_fk import G1Kinematics
 from supermimic.kinematics.rotations import quat_from_rotvec, rotvec_from_quat
+from supermimic.robots import get_robot
 
 
 def _random_state(model, rng, n):
@@ -49,17 +50,18 @@ def _signed_quat_err(q, q_ref):
     return np.abs(q * sign - q_ref).max()
 
 
+@pytest.mark.parametrize("robot", ["g1", "t2"])
 @pytest.mark.parametrize("dtype,atol_pos,atol_vel", [(torch.float64, 1e-10, 1e-9), (torch.float32, 2e-5, 2e-4)])
-def test_fk_matches_mujoco(dtype, atol_pos, atol_vel):
+def test_fk_matches_mujoco(robot, dtype, atol_pos, atol_vel):
     torch.backends.cuda.matmul.allow_tf32 = False
-    model = load_g1_model()
+    model = get_robot(robot).load_model()
     rng = np.random.default_rng(0)
     qpos, qvel = _random_state(model, rng, 64)
     pos_ref, quat_ref, lin_ref, ang_ref = _mujoco_reference(model, qpos, qvel)
 
     fk = G1Kinematics(model, device="cpu", dtype=dtype)
     out = fk(torch.as_tensor(qpos, dtype=dtype), torch.as_tensor(qvel, dtype=dtype))
-    assert out["pos"].shape == (64, 30, 3) and out["quat"].shape == (64, 30, 4)
+    assert out["pos"].shape == (64, model.nbody - 1, 3) and out["quat"].shape == (64, model.nbody - 1, 4)
     np.testing.assert_allclose(out["pos"].numpy(), pos_ref, atol=atol_pos)
     assert _signed_quat_err(out["quat"].numpy(), quat_ref) < atol_pos * 10
     np.testing.assert_allclose(out["ang_vel"].numpy(), ang_ref, atol=atol_vel)

@@ -15,12 +15,14 @@ def test_compact_matches_full():
     torch.backends.cuda.matmul.allow_tf32 = False
     from supermimic.envs.mdp.motion_library import MotionLibrary, discover_npz
     from supermimic.envs.tracking_env_cfg import TRACKED_BODIES
+    from supermimic.robots import get_robot
 
     files = discover_npz(NPZ, names=["walk1_subject1", "jumps1_subject1"])
     q0 = torch.zeros(29)
+    model = get_robot("g1").load_model()
     full = MotionLibrary(files, TRACKED_BODIES, q0, device="cuda", compact=False)
-    comp32 = MotionLibrary(files, TRACKED_BODIES, q0, device="cuda", compact=True, store_dtype=torch.float32)
-    comp16 = MotionLibrary(files, TRACKED_BODIES, q0, device="cuda", compact=True, store_dtype=torch.float16)
+    comp32 = MotionLibrary(files, TRACKED_BODIES, q0, device="cuda", compact=True, store_dtype=torch.float32, fk_model=model)
+    comp16 = MotionLibrary(files, TRACKED_BODIES, q0, device="cuda", compact=True, store_dtype=torch.float16, fk_model=model)
     f = torch.randint(0, full.num_frames, (512,), device="cuda")
     bf, b32, b16 = full.bodies(f), comp32.bodies(f), comp16.bodies(f)
     np.testing.assert_allclose(b32.pos_w.cpu().numpy(), bf.pos_w.cpu().numpy(), atol=2e-5)

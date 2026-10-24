@@ -22,6 +22,7 @@ class DataCfg:
 
 @dataclass
 class EnvCfg:
+    robot: str = "g1"  # g1 | t2 (supermimic.robots)
     num_envs: int = 4096
     episode_length_s: float = 10.0
     action_noise_std: float = 0.1

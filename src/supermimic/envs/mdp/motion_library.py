@@ -25,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import mujoco
 import numpy as np
 import torch
 
@@ -83,6 +84,8 @@ class MotionLibrary:
         bin_frames: int = 50,
         compact: bool = False,
         store_dtype: torch.dtype = torch.float16,
+        root_body_name: str = "pelvis",
+        fk_model: mujoco.MjModel | None = None,  # compact mode only: the robot's CPU model for the differentiable FK
     ):
         self.device = torch.device(device)
         self.dtype = dtype
@@ -115,7 +118,7 @@ class MotionLibrary:
                 if body_idx is None:
                     names = [str(n) for n in d["body_names"]]
                     body_idx = np.array([names.index(n) for n in self.body_names])
-                    root_idx = names.index("pelvis")
+                    root_idx = names.index(root_body_name)
                 n = int(d["joint_pos"].shape[0])
                 bp, bq, blv, bav = d["body_pos_w"], d["body_quat_w"], d["body_lin_vel_w"], d["body_ang_vel_w"]
                 ref = np.concatenate(
@@ -147,10 +150,10 @@ class MotionLibrary:
             del body_chunks
             self.goal_feat = goal_features(self._split(self._ref), q0)
         else:
-            from supermimic.data.motion_convert import load_g1_model
             from supermimic.kinematics.g1_fk import G1Kinematics
 
-            self._fk = G1Kinematics(load_g1_model(), device=self.device, dtype=dtype)
+            assert fk_model is not None, "compact libraries need the robot's MjModel for FK"
+            self._fk = G1Kinematics(fk_model, device=self.device, dtype=dtype)
             self._tracked_idx = self._fk.body_indices(self.body_names)
 
         self.clip_start = torch.tensor([c.start for c in clips], device=self.device, dtype=torch.long)
