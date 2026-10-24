@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn as nn
 
+from supermimic.envs.sim_context import XI_DIM
 from supermimic.world_model.dynamics import MLP
 from supermimic.world_model.heads import OBS_TERMS
 
@@ -83,9 +84,9 @@ class Policy(nn.Module):
 
 
 class Critic(nn.Module):
-    """V(canonical state 71, goal 680, xi 33, root error 4) -> scalar (one per interface)."""
+    """V(canonical state 71, goal 680, xi 34, root error 4) -> scalar (one per interface)."""
 
-    def __init__(self, cfg: CriticCfg, feat_dim: int = 71, goal_dim: int | None = None, xi_dim: int = 33, pcfg: PolicyCfg | None = None):
+    def __init__(self, cfg: CriticCfg, feat_dim: int = 71, goal_dim: int | None = None, xi_dim: int = XI_DIM, pcfg: PolicyCfg | None = None):
         super().__init__()
         pcfg = pcfg or PolicyCfg()
         goal_dim = goal_dim or pcfg.goal_dim

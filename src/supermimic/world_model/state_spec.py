@@ -53,16 +53,22 @@ class StateSpecCfg:
     # Input feature scales for [root_z, rot6d, lin_vel_h, ang_vel_b, joint_pos, joint_vel] (divide by these).
     in_scale: tuple[float, ...] = (1.0, 1.0, 1.0, 2.0, 1.0, 5.0)
     explicit_integration: bool = True
-    # xi normalisation: (offset, scale) for friction, encoder bias, com offset.
-    xi_offset: tuple[float, ...] = field(default_factory=lambda: (0.75,) + (0.0,) * 29 + (0.0,) * 3)
-    xi_scale: tuple[float, ...] = field(default_factory=lambda: (0.45,) + (0.01,) * 29 + (0.05,) * 3)
+    # xi normalisation: (offset, scale) for friction, encoder bias, com offset, command delay (steps).
+    xi_offset: tuple[float, ...] = field(
+        default_factory=lambda: (0.75,) + (0.0,) * 29 + (0.0,) * 3 + (4.0,)
+    )
+    xi_scale: tuple[float, ...] = field(
+        default_factory=lambda: (0.45,) + (0.01,) * 29 + (0.05,) * 3 + (4.0,)
+    )
 
 
 class StateSpec:
     def __init__(self, cfg: StateSpecCfg, device, dtype=torch.float32):
         self.cfg = cfg
         self.dt = cfg.dt
-        rep = lambda scales, sizes: torch.cat([torch.full((n,), float(s)) for s, n in zip(scales, sizes)])  # noqa: E731
+        rep = lambda scales, sizes: torch.cat(
+            [torch.full((n,), float(s)) for s, n in zip(scales, sizes)]
+        )  # noqa: E731
         self.err_scale = rep(cfg.err_scale, (3, 3, 3, 3, NJ, NJ)).to(device=device, dtype=dtype)
         self.out_scale = rep(cfg.out_scale, (3, 3, NJ, 3, 3, NJ)).to(device=device, dtype=dtype)
         self.in_scale = rep(cfg.in_scale, (1, 6, 3, 3, NJ, NJ)).to(device=device, dtype=dtype)
@@ -93,7 +99,14 @@ class StateSpec:
     def integrate(self, s: torch.Tensor, delta: torch.Tensor) -> torch.Tensor:
         """Apply the (unscaled) network output ``delta`` (…, 70) to state ``s`` (…, 71)."""
         d = delta * self.out_scale
-        dv_h, dw_b, dqd, dp_h, dth_b, dq = d[..., 0:3], d[..., 3:6], d[..., 6:35], d[..., 35:38], d[..., 38:41], d[..., 41:70]
+        dv_h, dw_b, dqd, dp_h, dth_b, dq = (
+            d[..., 0:3],
+            d[..., 3:6],
+            d[..., 6:35],
+            d[..., 35:38],
+            d[..., 38:41],
+            d[..., 41:70],
+        )
         p, q, qj, v, w, qd = self.split(s)
         q = quat_normalize(q)
         hq = heading_quat(q)

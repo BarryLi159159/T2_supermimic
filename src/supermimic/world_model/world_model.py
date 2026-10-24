@@ -77,7 +77,7 @@ class WorldModel(nn.Module):
     def window_loss(self, states: torch.Tensor, a_exec: torch.Tensor, xi: torch.Tensor, done: torch.Tensor, refs: list[ReferenceFrame]):
         """k-step autoregressive loss.
 
-        states: (k+1, n, 71) logged states; a_exec: (k, n, 29); xi: (n, 33);
+        states: (k+1, n, 71) logged states; a_exec: (k, n, 29); xi: (n, 34);
         done: (k, n) termination label of states 1..k; refs[j]: reference of transition j (for the
         termination features of state j+1).
         """

@@ -63,7 +63,7 @@ def test_replay_rows_and_windows(env):
     rows = [t for t in range(buf.T) if buf.valid[e, t]]
     assert len(rows) > 5
     w = buf.sample_windows(256, 8)
-    assert w.states.shape == (9, 256, 71) and w.a_exec.shape == (8, 256, 29) and w.xi.shape == (256, 33)
+    assert w.states.shape == (9, 256, 71) and w.a_exec.shape == (8, 256, 29) and w.xi.shape == (256, 34)
     assert torch.isfinite(w.states).all()
     # Executed action differs from the clean one by the injected noise only.
     d = (w.a_exec - w.a_clean).std().item()
@@ -93,7 +93,7 @@ def test_state_io_round_trip(env):
 def test_sim_context(env):
     rec = env.recorder_manager.get_term("replay")
     xi = rec.ctx.read()
-    assert xi.shape == (32, 33)
+    assert xi.shape == (32, 34)
     fr = xi[:, 0]
     assert (fr >= 0.3 - 1e-6).all() and (fr <= 1.2 + 1e-6).all()
     assert xi[:, 1:30].abs().max() <= 0.01 + 1e-6
