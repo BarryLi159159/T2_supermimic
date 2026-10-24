@@ -35,6 +35,7 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--twist2", required=True)
     p.add_argument("--supermimic", required=True)
+    p.add_argument("--twist2_ckpt", default=None, help="override the TWIST2 task checkpoint (absolute .onnx path)")
     p.add_argument("--seconds", type=float, default=12.0)
     p.add_argument("--out", required=True)
     p.add_argument("--fps", type=int, default=25)
@@ -59,6 +60,8 @@ def main() -> None:
     cfg_t = get_task(a.twist2)
     cfg_t.policy.stop_at_motion_end = False
     cfg_t.policy.enable_safety_fallback = False
+    if a.twist2_ckpt:
+        cfg_t.policy.checkpoint_path = os.path.abspath(a.twist2_ckpt)
     ct = MujocoController(cfg_t)
     pt = ct.policy
     mt, dt = ct.mj_model, ct.mj_data
