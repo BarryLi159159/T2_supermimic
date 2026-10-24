@@ -17,7 +17,7 @@ real T2 (natural frequency 10 Hz), wrists 18.21 / 1.449 for the hand's own weigh
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import mujoco
@@ -65,7 +65,7 @@ WAIST_ROLL = B6025x24.parallel(2.4, 0.4, 3.825669)
 
 
 def booster_actuator(
-    names: tuple[str, ...], kp: float, kd: float, motor: Motor
+    names: tuple[str, ...], kp: float, kd: float, motor: Motor, delay_steps: int = DELAY_MAX_STEPS
 ) -> DcMotorActuatorCfg:
     v_max, v_knee = motor.no_load_speed, motor.knee_speed
     return DcMotorActuatorCfg(
@@ -77,43 +77,35 @@ def booster_actuator(
         velocity_limit=v_max,
         armature=motor.armature,
         delay_min_lag=0,
-        delay_max_lag=DELAY_MAX_STEPS,
+        delay_max_lag=delay_steps,
         delay_hold_prob=1.0,  # one lag per episode: sampled at reset, held until the next reset
     )
 
 
-# Gains: Booster_T2 config/t2_robot_config.py (= booster_deploy t2_walk), wrists 18.21 / 1.449.
-T2_ACTUATORS = (
-    booster_actuator(
-        (
-            ".*_hip_yaw_joint",
-            ".*_hip_roll_joint",
-            ".*_hip_pitch_joint",
-            ".*_knee_pitch_joint",
-            "waist_yaw_joint",
-        ),
-        110.9343,
-        3.5311,
-        B7629x22,
-    ),
-    booster_actuator(("waist_roll_joint",), 206.9129, 1.7215, WAIST_ROLL),
-    booster_actuator(("waist_pitch_joint",), 155.9961, 1.7215, WAIST_PITCH),
-    booster_actuator((".*_ankle_pitch_joint",), 141.7042, 1.7215, ANKLE_PITCH),
-    booster_actuator((".*_ankle_roll_joint",), 52.6468, 1.7215, ANKLE_ROLL),
-    booster_actuator((".*_shoulder_pitch_joint",), 67.1133, 2.1362, B6030x24),
-    booster_actuator(
-        (".*_shoulder_roll_joint", ".*_elbow_pitch_joint", ".*_elbow_yaw_joint"),
-        54.0854,
-        1.7215,
-        B6025x24,
-    ),
-    booster_actuator(
-        (".*_wrist_pitch_joint", ".*_wrist_yaw_joint", ".*_wrist_roll_joint"),
-        18.214394,
-        1.449455,
-        B4522x35,
-    ),
-)
+def t2_actuators(delay_steps: int = DELAY_MAX_STEPS) -> tuple[DcMotorActuatorCfg, ...]:
+    """Gains: Booster_T2 config/t2_robot_config.py (= booster_deploy t2_walk), wrists 18.21 / 1.449."""
+    legs = (
+        ".*_hip_yaw_joint",
+        ".*_hip_roll_joint",
+        ".*_hip_pitch_joint",
+        ".*_knee_pitch_joint",
+        "waist_yaw_joint",
+    )
+    arms = (".*_shoulder_roll_joint", ".*_elbow_pitch_joint", ".*_elbow_yaw_joint")
+    wrists = (".*_wrist_pitch_joint", ".*_wrist_yaw_joint", ".*_wrist_roll_joint")
+    return (
+        booster_actuator(legs, 110.9343, 3.5311, B7629x22, delay_steps),
+        booster_actuator(("waist_roll_joint",), 206.9129, 1.7215, WAIST_ROLL, delay_steps),
+        booster_actuator(("waist_pitch_joint",), 155.9961, 1.7215, WAIST_PITCH, delay_steps),
+        booster_actuator((".*_ankle_pitch_joint",), 141.7042, 1.7215, ANKLE_PITCH, delay_steps),
+        booster_actuator((".*_ankle_roll_joint",), 52.6468, 1.7215, ANKLE_ROLL, delay_steps),
+        booster_actuator((".*_shoulder_pitch_joint",), 67.1133, 2.1362, B6030x24, delay_steps),
+        booster_actuator(arms, 54.0854, 1.7215, B6025x24, delay_steps),
+        booster_actuator(wrists, 18.214394, 1.449455, B4522x35, delay_steps),
+    )
+
+
+T2_ACTUATORS = t2_actuators()
 
 # Booster's standing pose. Trunk height 0.994 m puts the soles 2 cm above the ground in this pose
 # (pelvis at 0.828 m, the same stance Teleopit's pelvis-rooted T2 stands in at 0.83 m).
@@ -145,19 +137,20 @@ FULL_COLLISION = CollisionCfg(
     friction={FOOT_GEOM_REGEX: (0.6,)},
 )
 
-T2_ARTICULATION = EntityArticulationInfoCfg(actuators=T2_ACTUATORS, soft_joint_pos_limit_factor=0.9)
-
 
 def get_spec() -> mujoco.MjSpec:
     return mujoco.MjSpec.from_file(str(T2_XML))
 
 
-def get_t2_robot_cfg() -> EntityCfg:
+def get_t2_robot_cfg(delay_steps: int = DELAY_MAX_STEPS) -> EntityCfg:
+    articulation = EntityArticulationInfoCfg(
+        actuators=t2_actuators(delay_steps), soft_joint_pos_limit_factor=0.9
+    )
     return EntityCfg(
         init_state=HOME_KEYFRAME,
         collisions=(FULL_COLLISION,),
         spec_fn=get_spec,
-        articulation=T2_ARTICULATION,
+        articulation=articulation,
     )
 
 
@@ -167,42 +160,24 @@ for _act in T2_ACTUATORS:
         T2_ACTION_SCALE[_name] = 0.25 * _act.effort_limit / _act.stiffness
 
 # Model joint order (arms, waist, legs), which is also the policy and npz order.
+_ARM = (
+    "shoulder_pitch",
+    "shoulder_roll",
+    "elbow_pitch",
+    "elbow_yaw",
+    "wrist_pitch",
+    "wrist_yaw",
+    "wrist_roll",
+)
+_LEG = ("hip_pitch", "hip_roll", "hip_yaw", "knee_pitch", "ankle_pitch", "ankle_roll")
 T2_JOINT_NAMES: tuple[str, ...] = (
-    *(
-        f"left_{j}_joint"
-        for j in (
-            "shoulder_pitch",
-            "shoulder_roll",
-            "elbow_pitch",
-            "elbow_yaw",
-            "wrist_pitch",
-            "wrist_yaw",
-            "wrist_roll",
-        )
-    ),
-    *(
-        f"right_{j}_joint"
-        for j in (
-            "shoulder_pitch",
-            "shoulder_roll",
-            "elbow_pitch",
-            "elbow_yaw",
-            "wrist_pitch",
-            "wrist_yaw",
-            "wrist_roll",
-        )
-    ),
+    *(f"left_{j}_joint" for j in _ARM),
+    *(f"right_{j}_joint" for j in _ARM),
     "waist_pitch_joint",
     "waist_roll_joint",
     "waist_yaw_joint",
-    *(
-        f"left_{j}_joint"
-        for j in ("hip_pitch", "hip_roll", "hip_yaw", "knee_pitch", "ankle_pitch", "ankle_roll")
-    ),
-    *(
-        f"right_{j}_joint"
-        for j in ("hip_pitch", "hip_roll", "hip_yaw", "knee_pitch", "ankle_pitch", "ankle_roll")
-    ),
+    *(f"left_{j}_joint" for j in _LEG),
+    *(f"right_{j}_joint" for j in _LEG),
 )
 
 T2 = RobotSpec(
@@ -234,3 +209,6 @@ T2 = RobotSpec(
     foot_geom_regex=FOOT_GEOM_REGEX,
     com_body="trunk",
 )
+
+# Diagnostic variant: the same robot without the command delay (everything else equal), to price the delay model.
+T2_NODELAY = replace(T2, name="t2_nodelay", entity_cfg=lambda: get_t2_robot_cfg(delay_steps=0))
