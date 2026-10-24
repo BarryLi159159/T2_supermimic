@@ -70,7 +70,7 @@ def main() -> None:
     tw_joints = [str(n) for n in motion["joint_names"]]
     qadr_t = [mt.joint(n).qposadr[0] for n in tw_joints]
     vadr_t = [mt.joint(n).dofadr[0] for n in tw_joints]
-    assert len(clip.joint_pos) + lead >= len(motion["dof_pos"]) - 2, "the two motions are not the same clip"
+    assert abs(len(clip.joint_pos) + lead - len(motion["dof_pos"])) <= 5, "the two motions are not the same clip"
     # SuperMimic joint order -> TWIST2 order for the shared reference
     perm = [ps.policy_joints.index(n) for n in tw_joints]
 
