@@ -47,6 +47,8 @@ class ScheduleCfg:
     warmup_iterations: int = 40  # env steps before the first update (fills k-step windows)
     lr_final_ratio: float = 0.03
     lr_decay_fraction: float = 250_000 / 320_000
+    lr_warmup_iterations: int = 0  # linear ramp of the learning rate from 0; for fine-tuning a converged checkpoint
+    policy_freeze_iterations: int = 0  # actor not updated before this iteration (world model / critic adapt first when fine-tuning on changed dynamics)
     log_interval: int = 50  # iterations
     checkpoint_interval: int = 4000  # iterations
     max_hours: float | None = None
@@ -68,5 +70,5 @@ class TrainConfig:
     schedule: ScheduleCfg = field(default_factory=ScheduleCfg)
     resume: Path | None = None  # continue a run: weights, optimizers, iteration, sampling state
     finetune: Path | None = (
-        None  # start a new run from a checkpoint's weights only (fresh optimizers and schedule); xi may be wider
+        None  # start a new run from a checkpoint's weights, Adam moments and sampler state (fresh schedule); xi may be wider
     )

@@ -152,32 +152,48 @@ class Trainer:
         )
 
     def load_weights(self, path: Path) -> None:
-        """Weights only, for fine-tuning on a changed robot: a wider simulation context (new xi entries appended at
-        the end of xi) gets zero input columns in the first layer of the dynamics network and the critic."""
+        """Fine-tune on a changed robot: weights, Adam moments and the return-based sampler state come from the
+        checkpoint, iteration and learning-rate schedule start fresh. A wider simulation context (new xi entries
+        appended at the end of xi) gets zero input columns, and zero Adam moments, in the first layer of the dynamics
+        network and the critic."""
         ck = torch.load(path, map_location=self.device, weights_only=False)
         wm_sd, critic_sd = ck["wm"], ck["critic"]
         new_xi = self.wm.dynamics.mlp.net[0].in_features - (71 + 29)
         old_xi = wm_sd["dynamics.mlp.net.0.weight"].shape[1] - (71 + 29)
+        goal_dim = self.cfg.policy.goal_dim
+        widen = lambda w, start: torch.cat(
+            [
+                w[:, : start + old_xi],
+                w.new_zeros(w.shape[0], new_xi - old_xi),
+                w[:, start + old_xi :],
+            ],
+            dim=1,
+        )
         if old_xi != new_xi:
-            widen = lambda w, start: torch.cat(
-                [
-                    w[:, : start + old_xi],
-                    w.new_zeros(w.shape[0], new_xi - old_xi),
-                    w[:, start + old_xi :],
-                ],
-                dim=1,
-            )
             wm_sd["dynamics.mlp.net.0.weight"] = widen(wm_sd["dynamics.mlp.net.0.weight"], 71 + 29)
-            goal_dim = self.cfg.policy.goal_dim
             critic_sd["mlp.net.0.weight"] = widen(critic_sd["mlp.net.0.weight"], 71 + goal_dim)
+            # Adam keeps one exp_avg / exp_avg_sq per parameter, indexed in parameters() order
+            for opt_sd, params, first, start in (
+                (ck["wm_opt"], list(self.wm.parameters()), self.wm.dynamics.mlp.net[0].weight, 71 + 29),
+                (ck["critic_opt"], list(self.critic.parameters()), self.critic.mlp.net[0].weight, 71 + goal_dim),
+            ):
+                idx = next(i for i, q in enumerate(params) if q is first)
+                st = opt_sd["state"][idx]
+                for k in ("exp_avg", "exp_avg_sq"):
+                    st[k] = widen(st[k], start)
             print(
-                f"[INFO] fine-tune: xi widened {old_xi} -> {new_xi} (zero columns for the new entries)"
+                f"[INFO] fine-tune: xi widened {old_xi} -> {new_xi} (zero columns and zero Adam moments for the new entries)"
             )
         self.wm.load_state_dict(wm_sd)
         self.policy.load_state_dict(ck["policy"])
         self.critic.load_state_dict(critic_sd)
+        self.wm_trainer.opt.load_state_dict(ck["wm_opt"])
+        self.policy_trainer.opt.load_state_dict(ck["policy_opt"])
+        self.policy_trainer.critic_opt.load_state_dict(ck["critic_opt"])
+        self.command.bin_return.copy_(ck["bin_return"])
+        self.command.bin_memory.copy_(ck["bin_memory"])
         print(
-            f"[INFO] fine-tune from {path} (iteration {ck['iteration']}): weights loaded, optimizers and schedule fresh"
+            f"[INFO] fine-tune from {path} (iteration {ck['iteration']}): weights, Adam moments and sampler state loaded, schedule fresh"
         )
 
     def load(self, path: Path) -> None:
@@ -245,6 +261,8 @@ class Trainer:
                         sch.lr_final_ratio,
                         sch.lr_decay_fraction,
                     )
+                    if sch.lr_warmup_iterations > 0:
+                        lr *= min(1.0, self.iteration / sch.lr_warmup_iterations)
                     self.wm_trainer.set_lr(lr)
                     self.policy_trainer.set_lr(lr * cfg.policy_trainer.lr / cfg.wm_trainer.lr)
                     t0 = time.perf_counter()
@@ -253,7 +271,9 @@ class Trainer:
                     timers["wm"] += time.perf_counter() - t0
                     t0 = time.perf_counter()
                     for _ in range(sch.policy_updates_per_wm_update):
-                        m_pi = self.policy_trainer.update(self.buffer)
+                        m_pi = self.policy_trainer.update(
+                            self.buffer, train_actor=self.iteration >= sch.policy_freeze_iterations
+                        )
                     torch.cuda.synchronize()
                     timers["policy"] += time.perf_counter() - t0
                     self.num_updates += 1

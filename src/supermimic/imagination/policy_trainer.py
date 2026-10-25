@@ -57,7 +57,9 @@ class PolicyTrainer:
         feat = self.wm.spec.canonical(ro.states.reshape(H1 * n, -1)).reshape(H1, n, -1)
         return feat, ro.goals, ro.e_root
 
-    def update(self, buffer: ReplayBuffer, xi_norm_fn=None) -> dict[str, float]:
+    def update(self, buffer: ReplayBuffer, xi_norm_fn=None, train_actor: bool = True) -> dict[str, float]:
+        """One imagination rollout: actor step by BPTT through the frozen world model (skipped when train_actor is
+        False, e.g. while a fine-tune lets the world model and critic adapt first), then the critic fit."""
         cfg = self.cfg
         start = buffer.sample_starts(cfg.batch_size, cfg.history)
         xi_norm = self.wm.spec.normalize_xi(start.xi)
@@ -65,20 +67,24 @@ class PolicyTrainer:
         # ---- actor: BPTT through the frozen world model ------------------------------------
         self.wm.requires_grad_(False)
         self.critic.requires_grad_(False)
-        ro = imagine(self.wm, self.policy, self.lib, start, cfg.horizon, cfg.future_frames, obs_noise=cfg.obs_noise, step_fn=self.step_fn, anchor_obs=cfg.anchor_obs)
-        feat, goals, e_root = self._critic_inputs(ro)
-        if cfg.use_critic:
-            v_H = self.critic(feat[-1], goals[-1], xi_norm, e_root[-1])
+        with torch.set_grad_enabled(train_actor):
+            ro = imagine(self.wm, self.policy, self.lib, start, cfg.horizon, cfg.future_frames, obs_noise=cfg.obs_noise, step_fn=self.step_fn, anchor_obs=cfg.anchor_obs)
+            feat, goals, e_root = self._critic_inputs(ro)
+            if cfg.use_critic:
+                v_H = self.critic(feat[-1], goals[-1], xi_norm, e_root[-1])
+            else:
+                v_H = None
+            J = policy_objective(ro, v_H, cfg.gamma)
+        if train_actor:
+            loss = -J / cfg.horizon
+            self.opt.zero_grad(set_to_none=True)
+            loss.backward()
+            allreduce_grads(self.policy)
+            gn = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), cfg.grad_clip_norm)
+            torch.nn.utils.clip_grad_value_(self.policy.parameters(), cfg.grad_clip_value)
+            self.opt.step()
         else:
-            v_H = None
-        J = policy_objective(ro, v_H, cfg.gamma)
-        loss = -J / cfg.horizon
-        self.opt.zero_grad(set_to_none=True)
-        loss.backward()
-        allreduce_grads(self.policy)
-        gn = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), cfg.grad_clip_norm)
-        torch.nn.utils.clip_grad_value_(self.policy.parameters(), cfg.grad_clip_value)
-        self.opt.step()
+            gn = torch.zeros(())
         self.wm.requires_grad_(True)
         self.critic.requires_grad_(True)
 
