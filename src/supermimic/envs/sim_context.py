@@ -1,4 +1,5 @@
-"""Per-environment simulation context xi: foot friction 1 + encoder bias 29 + torso COM offset 3 + command delay 1 = 34.
+"""Per-environment simulation context xi: foot friction 1 + encoder bias 29 + torso COM offset 3 + command delay 1
++ wrist payload 4 (left mass, left offset, right mass, right offset; zero without the event) = 38.
 
 The delay (physics steps, drawn once per episode by the actuator model) is a simulator parameter like the others:
 the world model and the critic see it, the policy never does."""
@@ -8,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-XI_DIM = 34
+XI_DIM = 38
 
 
 class SimContext:
@@ -38,6 +39,7 @@ class SimContext:
             (a._delay_buffer for a in self.robot.actuators if a._delay_buffer is not None), None
         )
         self.zero_lag = torch.zeros(env.num_envs, 1, device=env.device)
+        self.zero_payload = torch.zeros(env.num_envs, 4, device=env.device)
 
     def read(self) -> torch.Tensor:
         model = self.env.sim.model
@@ -58,6 +60,9 @@ class SimContext:
             if self.delay_buffer is not None
             else self.zero_lag
         )
-        xi = torch.cat([friction.reshape(n, 1), bias, com, lag], dim=-1)
+        payload = getattr(self.env, "wrist_payload", None)
+        if payload is None:
+            payload = self.zero_payload
+        xi = torch.cat([friction.reshape(n, 1), bias, com, lag, payload], dim=-1)
         assert xi.shape == (n, XI_DIM)
         return xi.clone()

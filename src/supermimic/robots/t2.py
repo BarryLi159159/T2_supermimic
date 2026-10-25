@@ -28,6 +28,9 @@ from mjlab.utils.spec_config import CollisionCfg
 from supermimic.robots import RobotSpec
 
 T2_XML = Path(__file__).resolve().parents[3] / "assets" / "t2" / "t2_29dof_trunk.xml"
+T2_SHARPA_XML = T2_XML.with_name(
+    "t2_29dof_trunk_sharpa.xml"
+)  # wrist links carry the Sharpa Wave hands (1.64 kg)
 
 PHYSICS_DT = 0.005
 DELAY_MAX_STEPS = 8  # 0-40 ms command latency, booster_train's range
@@ -142,14 +145,18 @@ def get_spec() -> mujoco.MjSpec:
     return mujoco.MjSpec.from_file(str(T2_XML))
 
 
-def get_t2_robot_cfg(delay_steps: int = DELAY_MAX_STEPS) -> EntityCfg:
+def get_sharpa_spec() -> mujoco.MjSpec:
+    return mujoco.MjSpec.from_file(str(T2_SHARPA_XML))
+
+
+def get_t2_robot_cfg(delay_steps: int = DELAY_MAX_STEPS, sharpa: bool = False) -> EntityCfg:
     articulation = EntityArticulationInfoCfg(
         actuators=t2_actuators(delay_steps), soft_joint_pos_limit_factor=0.9
     )
     return EntityCfg(
         init_state=HOME_KEYFRAME,
         collisions=(FULL_COLLISION,),
-        spec_fn=get_spec,
+        spec_fn=get_sharpa_spec if sharpa else get_spec,
         articulation=articulation,
     )
 
@@ -212,3 +219,8 @@ T2 = RobotSpec(
 
 # Diagnostic variant: the same robot without the command delay (everything else equal), to price the delay model.
 T2_NODELAY = replace(T2, name="t2_nodelay", entity_cfg=lambda: get_t2_robot_cfg(delay_steps=0))
+
+# Sharpa Wave hands: the wrist links carry the hand + flange (TWIST2 v3's URDF); train with the wrist payload event.
+T2_SHARPA = replace(
+    T2, name="t2_sharpa", xml_path=T2_SHARPA_XML, entity_cfg=lambda: get_t2_robot_cfg(sharpa=True)
+)

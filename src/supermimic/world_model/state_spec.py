@@ -53,12 +53,12 @@ class StateSpecCfg:
     # Input feature scales for [root_z, rot6d, lin_vel_h, ang_vel_b, joint_pos, joint_vel] (divide by these).
     in_scale: tuple[float, ...] = (1.0, 1.0, 1.0, 2.0, 1.0, 5.0)
     explicit_integration: bool = True
-    # xi normalisation: (offset, scale) for friction, encoder bias, com offset, command delay (steps).
+    # xi normalisation: (offset, scale) for friction, encoder bias, com offset, command delay (steps), wrist payload (kg, m) x 2.
     xi_offset: tuple[float, ...] = field(
-        default_factory=lambda: (0.75,) + (0.0,) * 29 + (0.0,) * 3 + (4.0,)
+        default_factory=lambda: (0.75,) + (0.0,) * 29 + (0.0,) * 3 + (4.0,) + (0.75, 0.125) * 2
     )
     xi_scale: tuple[float, ...] = field(
-        default_factory=lambda: (0.45,) + (0.01,) * 29 + (0.05,) * 3 + (4.0,)
+        default_factory=lambda: (0.45,) + (0.01,) * 29 + (0.05,) * 3 + (4.0,) + (0.75, 0.075) * 2
     )
 
 

@@ -17,12 +17,15 @@ class DataCfg:
     clips: list[str] | None = None  # None = all npz in npz_dir
     limit: int | None = None
     manifest: Path | None = None  # csv with name,keep (filter_bones_seed.py output)
-    library: Path | None = None  # packed compact library (.pt from build_library.py); overrides npz_dir
+    library: Path | None = (
+        None  # packed compact library (.pt from build_library.py); overrides npz_dir
+    )
 
 
 @dataclass
 class EnvCfg:
-    robot: str = "g1"  # g1 | t2 (supermimic.robots)
+    robot: str = "g1"  # g1 | t2 | t2_sharpa (supermimic.robots)
+    wrist_payload: bool = False  # Sharpa version: per-episode hand payload 0-1.5 kg at 5-20 cm
     num_envs: int = 4096
     episode_length_s: float = 10.0
     action_noise_std: float = 0.1
@@ -63,4 +66,7 @@ class TrainConfig:
     critic: CriticCfg = field(default_factory=CriticCfg)
     policy_trainer: PolicyTrainerCfg = field(default_factory=PolicyTrainerCfg)
     schedule: ScheduleCfg = field(default_factory=ScheduleCfg)
-    resume: Path | None = None
+    resume: Path | None = None  # continue a run: weights, optimizers, iteration, sampling state
+    finetune: Path | None = (
+        None  # start a new run from a checkpoint's weights only (fresh optimizers and schedule); xi may be wider
+    )

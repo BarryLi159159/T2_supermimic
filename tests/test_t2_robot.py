@@ -119,3 +119,68 @@ def test_env_builds_with_paper_dimensions():
         assert torch.isfinite(rew).all() and not term.any()
     finally:
         env.close()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+@pytest.mark.skipif(not NPZ.exists(), reason="T2 LAFAN1 npz not built")
+def test_sharpa_wrist_payload_matches_parallel_axis():
+    """The per-episode hand payload must land in xi and compose mass / COM / inertia exactly like a point mass."""
+    from supermimic.envs import SuperMimicEnvCfgArgs, make_env
+    from supermimic.envs.mdp.motion_library import discover_npz
+    from supermimic.envs.sim_context import XI_DIM
+
+    files = [str(f) for f in discover_npz(NPZ)[:2]]
+    env = make_env(
+        SuperMimicEnvCfgArgs(
+            npz_files=files,
+            robot="t2_sharpa",
+            wrist_payload=True,
+            num_envs=8,
+            replay_capacity=8,
+            seed=0,
+        ),
+        device="cuda:0",
+    )
+    try:
+        robot, model, mj = env.scene["robot"], env.sim.model, env.sim.mj_model
+        env.reset()
+        xi = env.recorder_manager.get_term("replay").ctx.read()
+        assert xi.shape == (8, XI_DIM) and XI_DIM == 38
+        payload = xi[:, -4:].cpu().numpy()
+        assert (payload[:, [0, 2]] >= 0).all() and (payload[:, [0, 2]] <= 1.5).all()
+        assert (payload[:, [1, 3]] >= 0.05).all() and (payload[:, [1, 3]] <= 0.20).all()
+        assert len(np.unique(np.round(payload[:, 0], 4))) > 1  # drawn per env
+        for k, (name, sign) in enumerate(
+            (("left_wrist_roll_link", 1.0), ("right_wrist_roll_link", -1.0))
+        ):
+            b = int(robot.indexing.body_ids[robot.body_names.index(name)].item())
+            assert abs(mj.body_mass[b] - 1.64) < 0.01  # the Sharpa model, not the bare wrist
+            m0, c0 = float(mj.body_mass[b]), mj.body_ipos[b].copy()
+            rot = np.zeros(9)
+            mujoco.mju_quat2Mat(rot, mj.body_iquat[b])
+            rot = rot.reshape(3, 3)
+            i0 = rot @ np.diag(mj.body_inertia[b]) @ rot.T
+            for e in range(8):
+                m_add, dist = float(payload[e, 2 * k]), float(payload[e, 2 * k + 1])
+                d = np.array([0.0, sign * dist, 0.0])
+                m1 = m0 + m_add
+                c1 = (m0 * c0 + m_add * d) / m1
+                shift = lambda m, v: m * (v @ v * np.eye(3) - np.outer(v, v))
+                i1 = i0 + shift(m0, c0 - c1) + shift(m_add, d - c1)
+                q = model.body_iquat[e, b].cpu().numpy()
+                r1 = np.zeros(9)
+                mujoco.mju_quat2Mat(r1, q)
+                r1 = r1.reshape(3, 3)
+                i1_sim = r1 @ np.diag(model.body_inertia[e, b].cpu().numpy()) @ r1.T
+                assert abs(float(model.body_mass[e, b]) - m1) < 1e-5
+                np.testing.assert_allclose(model.body_ipos[e, b].cpu().numpy(), c1, atol=1e-6)
+                np.testing.assert_allclose(i1_sim, i1, atol=1e-7)
+        masses = model.body_mass[:, b].cpu().numpy().copy()
+        env.reset()
+        xi2 = env.recorder_manager.get_term("replay").ctx.read()[:, -4:].cpu().numpy()
+        assert np.allclose(
+            model.body_mass[:, b].cpu().numpy(), m0 + xi2[:, 2], atol=1e-5
+        )  # re-drawn from the nominal, not accumulated
+        assert not np.allclose(masses, model.body_mass[:, b].cpu().numpy())
+    finally:
+        env.close()

@@ -50,4 +50,8 @@ def get_robot(name: str) -> RobotSpec:
         from supermimic.robots.t2 import T2_NODELAY
 
         return T2_NODELAY
-    raise KeyError(f"unknown robot {name!r}; known: g1, t2, t2_nodelay")
+    if name == "t2_sharpa":
+        from supermimic.robots.t2 import T2_SHARPA
+
+        return T2_SHARPA
+    raise KeyError(f"unknown robot {name!r}; known: g1, t2, t2_nodelay, t2_sharpa")
