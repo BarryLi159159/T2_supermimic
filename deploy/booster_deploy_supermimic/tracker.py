@@ -46,8 +46,9 @@ class SuperMimicPolicy(Policy):
         self._model = OnnxPolicy(model_path)
         with open(os.path.splitext(model_path)[0] + ".json") as f:
             meta = json.load(f)
-        if meta["robot"] != "t2":
+        if meta["robot"] not in ("t2", "t2_sharpa"):
             raise ValueError(f"{model_path} was trained on {meta['robot']}, this task is for the T2")
+        self.trained_robot = meta["robot"]  # t2 = bare 0.425 kg wrist link, t2_sharpa = Sharpa hand 1.64 kg; the MuJoCo xml must match
         self.policy_joints = list(meta["joint_names"])
         self.action_scale = np.asarray(meta["action_scale"], dtype=np.float64)
         self.default = np.asarray(meta["default_joint_pos"], dtype=np.float64)
