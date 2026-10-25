@@ -14,7 +14,9 @@ from booster_deploy.utils.registry import register_task
 
 from ...tracker import SuperMimicPolicyCfg
 
-CHECKPOINT = "robots/t2/models/t2_supermimic.onnx"
+CHECKPOINT = "robots/t2/models/t2_supermimic_bare_320000.onnx"  # bare 0.425 kg wrist link (official xml)
+SHARPA_CHECKPOINT = "robots/t2/models/t2_supermimic_sharpa_30000.onnx"  # Sharpa hand 1.64 kg + payload DR, fine-tuned from the bare 320k
+SHARPA_XML = os.path.join(os.path.dirname(__file__), "T2_31dof_sharpa.xml")  # official xml with the Sharpa wrist inertia (make_deploy_sharpa_xml.py)
 
 # v3 default pose (SuperMimic T2 HOME_KEYFRAME), head at zero
 DEFAULT_JOINT_POS = [
@@ -71,6 +73,13 @@ class T2SuperMimicControllerCfg(ControllerCfg):
 MOTION_DIR = os.path.join(os.path.dirname(__file__), "motions")
 for path in sorted(glob.glob(os.path.join(MOTION_DIR, "*.npz"))):
     name = os.path.splitext(os.path.basename(path))[0]
+    motion_path = os.path.join("robots", "t2", "motions", os.path.basename(path))
     cfg = T2SuperMimicControllerCfg()
-    cfg.policy.motion_path = os.path.join("robots", "t2", "motions", os.path.basename(path))
+    cfg.policy.motion_path = motion_path
     register_task(f"t2_supermimic_{name}", cfg)
+    # the hand version: same clip, Sharpa policy, Sharpa-mass MuJoCo (the real robot with the hands mounted)
+    cfg = T2SuperMimicControllerCfg()
+    cfg.policy.motion_path = motion_path
+    cfg.policy.checkpoint_path = SHARPA_CHECKPOINT
+    cfg.robot = cfg.robot.replace(mjcf_path=SHARPA_XML)
+    register_task(f"t2_supermimic_sharpa_{name}", cfg)

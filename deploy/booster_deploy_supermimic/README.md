@@ -6,8 +6,10 @@ Symlink this folder to `booster_deploy/tasks/supermimic`; every `robots/t2/motio
     python deploy.py --task t2_supermimic_walk1_subject1 --mujoco   # sim2sim with the reference ghost
     python deploy.py --task t2_supermimic_walk1_subject1            # real robot (X prepare, A start, B stop)
 
-Model: `robots/t2/models/t2_supermimic.onnx` + `.json` from `scripts/export_onnx.py` (fixed batch 1; the json carries
-joint order, per-joint action scale and default pose). Clips: mjlab-format npz at 50 Hz, trunk-rooted T2
+Models: `robots/t2/models/t2_supermimic_bare_320000.onnx` (bare 0.425 kg wrist link, tasks `t2_supermimic_<clip>`) and
+`t2_supermimic_sharpa_30000.onnx` (Sharpa hand 1.64 kg + payload DR, tasks `t2_supermimic_sharpa_<clip>`, MuJoCo uses
+`T2_31dof_sharpa.xml`), each with its `.json` from `scripts/export_onnx.py` (fixed batch 1; the json carries joint order,
+per-joint action scale, default pose and the training robot, which the policy checks against the task). Clips: mjlab-format npz at 50 Hz, trunk-rooted T2
 (`scripts/t2/pkl_to_npz_t2.py` output). `obs_layout.py` is the observation contract; `scripts/t2/check_deploy_obs.py`
 asserts it against the mjlab environment (1e-7 on a 30-step rollout).
 

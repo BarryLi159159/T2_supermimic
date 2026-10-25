@@ -76,7 +76,7 @@ def main() -> None:
         cfg_t.policy.checkpoint_path = os.path.abspath(a.twist2_ckpt)
     if a.sharpa:
         cfg_t.robot = cfg_t.robot.replace(mjcf_path=SHARPA_XML)
-    if ("sharpa" in os.path.basename(cfg_t.policy.checkpoint_path)) != a.sharpa:  # TWIST2 ONNX has no contract: go by the name
+    if ("sharpa" in cfg_t.policy.checkpoint_path) != a.sharpa:  # TWIST2 ONNX has no contract: go by the run / file name
         raise ValueError(f"hand mismatch: TWIST2 checkpoint {cfg_t.policy.checkpoint_path} with --sharpa={a.sharpa}")
     ct = MujocoController(cfg_t)
     pt = ct.policy
