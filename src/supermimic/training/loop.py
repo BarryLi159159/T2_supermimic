@@ -48,20 +48,28 @@ class Trainer:
         self.log_dir = Path(cfg.log_root) / cfg.run_name
         self.log_dir.mkdir(parents=True, exist_ok=True)
         if self.is_main:
-            (self.log_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2, default=str))
+            (self.log_dir / "config.json").write_text(
+                json.dumps(asdict(cfg), indent=2, default=str)
+            )
         self.writer = SummaryWriter(str(self.log_dir / "tb")) if self.is_main else None
 
         if cfg.data.library is not None:
             files = [cfg.data.library]
             cfg.env.compact_library = True
         else:
-            files = discover_npz(cfg.data.npz_dir, limit=cfg.data.limit, names=cfg.data.clips, manifest=cfg.data.manifest)
+            files = discover_npz(
+                cfg.data.npz_dir,
+                limit=cfg.data.limit,
+                names=cfg.data.clips,
+                manifest=cfg.data.manifest,
+            )
         if not files:
             raise FileNotFoundError(f"no clips under {cfg.data.npz_dir}")
         self.env = make_env(
             SuperMimicEnvCfgArgs(
                 npz_files=[str(f) for f in files],
                 robot=cfg.env.robot,
+                wrist_payload=cfg.env.wrist_payload,
                 num_envs=cfg.env.num_envs,
                 future_frames=cfg.env.future_frames,
                 episode_length_s=cfg.env.episode_length_s,
@@ -86,17 +94,28 @@ class Trainer:
 
         spec = get_robot(cfg.env.robot)
         fk = G1Kinematics(spec.load_model(), device=self.device)
-        heads = AnalyticHeads(fk, spec.tracked_bodies, spec.anchor_body, spec.root_body, robot.data.soft_joint_pos_limits[0].clone(), robot.data.default_joint_pos[0].clone())
+        heads = AnalyticHeads(
+            fk,
+            spec.tracked_bodies,
+            spec.anchor_body,
+            spec.root_body,
+            robot.data.soft_joint_pos_limits[0].clone(),
+            robot.data.default_joint_pos[0].clone(),
+        )
         self.wm = WorldModel(cfg.world_model, heads, self.device)
         self.policy = Policy(cfg.policy).to(self.device)
         self.critic = Critic(cfg.critic, pcfg=cfg.policy).to(self.device)
         for m in (self.wm, self.policy, self.critic):
             broadcast_params(m)
         self.wm_trainer = WorldModelTrainer(self.wm, self.lib, cfg.wm_trainer)
-        self.policy_trainer = PolicyTrainer(self.wm, self.policy, self.critic, self.lib, cfg.policy_trainer)
+        self.policy_trainer = PolicyTrainer(
+            self.wm, self.policy, self.critic, self.lib, cfg.policy_trainer
+        )
         n_params = lambda m: sum(p.numel() for p in m.parameters())  # noqa: E731
         if self.is_main:
-            print(f"[INFO] params: world model {n_params(self.wm)/1e6:.2f}M, policy {n_params(self.policy)/1e6:.2f}M, critic {n_params(self.critic)/1e6:.3f}M")
+            print(
+                f"[INFO] params: world model {n_params(self.wm) / 1e6:.2f}M, policy {n_params(self.policy) / 1e6:.2f}M, critic {n_params(self.critic) / 1e6:.3f}M"
+            )
 
         # Episode statistics of the training env (paper's "training return").
         self.ep_reward_sum = torch.zeros(env.num_envs, device=self.device)
@@ -107,6 +126,8 @@ class Trainer:
         self._utd_acc = 0.0
         if cfg.resume is not None:
             self.load(cfg.resume)
+        elif cfg.finetune is not None:
+            self.load_weights(cfg.finetune)
 
     # ------------------------------------------------------------------ checkpoints
 
@@ -128,6 +149,35 @@ class Trainer:
                 "config": asdict(self.cfg),
             },
             self.log_dir / name,
+        )
+
+    def load_weights(self, path: Path) -> None:
+        """Weights only, for fine-tuning on a changed robot: a wider simulation context (new xi entries appended at
+        the end of xi) gets zero input columns in the first layer of the dynamics network and the critic."""
+        ck = torch.load(path, map_location=self.device, weights_only=False)
+        wm_sd, critic_sd = ck["wm"], ck["critic"]
+        new_xi = self.wm.dynamics.mlp.net[0].in_features - (71 + 29)
+        old_xi = wm_sd["dynamics.mlp.net.0.weight"].shape[1] - (71 + 29)
+        if old_xi != new_xi:
+            widen = lambda w, start: torch.cat(
+                [
+                    w[:, : start + old_xi],
+                    w.new_zeros(w.shape[0], new_xi - old_xi),
+                    w[:, start + old_xi :],
+                ],
+                dim=1,
+            )
+            wm_sd["dynamics.mlp.net.0.weight"] = widen(wm_sd["dynamics.mlp.net.0.weight"], 71 + 29)
+            goal_dim = self.cfg.policy.goal_dim
+            critic_sd["mlp.net.0.weight"] = widen(critic_sd["mlp.net.0.weight"], 71 + goal_dim)
+            print(
+                f"[INFO] fine-tune: xi widened {old_xi} -> {new_xi} (zero columns for the new entries)"
+            )
+        self.wm.load_state_dict(wm_sd)
+        self.policy.load_state_dict(ck["policy"])
+        self.critic.load_state_dict(critic_sd)
+        print(
+            f"[INFO] fine-tune from {path} (iteration {ck['iteration']}): weights loaded, optimizers and schedule fresh"
         )
 
     def load(self, path: Path) -> None:
@@ -188,7 +238,13 @@ class Trainer:
                 self._utd_acc += sch.updates_per_env_step
                 while self._utd_acc >= 1.0:
                     self._utd_acc -= 1.0
-                    lr = cosine_lr(self.iteration, sch.total_iterations, cfg.wm_trainer.lr, sch.lr_final_ratio, sch.lr_decay_fraction)
+                    lr = cosine_lr(
+                        self.iteration,
+                        sch.total_iterations,
+                        cfg.wm_trainer.lr,
+                        sch.lr_final_ratio,
+                        sch.lr_decay_fraction,
+                    )
                     self.wm_trainer.set_lr(lr)
                     self.policy_trainer.set_lr(lr * cfg.policy_trainer.lr / cfg.wm_trainer.lr)
                     t0 = time.perf_counter()
@@ -232,7 +288,9 @@ class Trainer:
                 elif finished_returns:
                     tr = sum(finished_returns) / len(finished_returns)
                     self.writer.add_scalar("train/episode_norm_return", tr, it)
-                    self.writer.add_scalar("train/episode_len", sum(finished_lens) / max(len(finished_lens), 1), it)
+                    self.writer.add_scalar(
+                        "train/episode_len", sum(finished_lens) / max(len(finished_lens), 1), it
+                    )
                 else:
                     tr = float("nan")
                 with torch.no_grad():
@@ -247,15 +305,19 @@ class Trainer:
                         self.writer.add_scalar(f"time/{k}_s_per_iter", v / sch.log_interval, it)
                     self.writer.add_scalar("time/hours", elapsed / 3600, it)
                     self.writer.add_scalar("time/updates", self.num_updates, it)
-                    self.writer.add_scalar("sampler/entropy", float(self.command.metrics["sampling_entropy"][0]), it)
-                    self.writer.add_scalar("sampler/bin_return_mean", float(self.command.bin_return.mean()), it)
+                    self.writer.add_scalar(
+                        "sampler/entropy", float(self.command.metrics["sampling_entropy"][0]), it
+                    )
+                    self.writer.add_scalar(
+                        "sampler/bin_return_mean", float(self.command.bin_return.mean()), it
+                    )
                     dt_log = time.time() - last_log
                     last_log = time.time()
                     msg = (
-                        f"it {it} | {elapsed/3600:.2f} h | {sch.log_interval / dt_log:.1f} it/s | updates {self.num_updates} | "
+                        f"it {it} | {elapsed / 3600:.2f} h | {sch.log_interval / dt_log:.1f} it/s | updates {self.num_updates} | "
                         f"train_ret {tr:.3f} (n={n_finished}) | "
-                        f"wm nse1 {agg.get('wm/nse_1step', float('nan'))/max(agg_n,1):.4f} nse8 {(float(err[-1]) if err is not None else float('nan')):.4f} | "
-                        f"imag_ret {agg.get('policy/imag_return_undisc', float('nan'))/max(agg_n,1):.3f} surv {agg.get('policy/imag_survival_H', float('nan'))/max(agg_n,1):.3f} | "
+                        f"wm nse1 {agg.get('wm/nse_1step', float('nan')) / max(agg_n, 1):.4f} nse8 {(float(err[-1]) if err is not None else float('nan')):.4f} | "
+                        f"imag_ret {agg.get('policy/imag_return_undisc', float('nan')) / max(agg_n, 1):.3f} surv {agg.get('policy/imag_survival_H', float('nan')) / max(agg_n, 1):.3f} | "
                         f"t sim/wm/pi {timers['sim']:.1f}/{timers['wm']:.1f}/{timers['policy']:.1f}s"
                     )
                     print(msg, flush=True)
@@ -268,7 +330,9 @@ class Trainer:
             if sch.max_hours is not None and self.iteration % sch.log_interval == 0:
                 stop = float((time.time() - t_start) / 3600 > sch.max_hours)
                 if self.world > 1:
-                    stop = allreduce_mean(stop)  # rank 0's clock decides (all ranks agree on the mean > 0)
+                    stop = allreduce_mean(
+                        stop
+                    )  # rank 0's clock decides (all ranks agree on the mean > 0)
                 if stop > 0:
                     if self.is_main:
                         print("[INFO] max_hours reached, stopping")
