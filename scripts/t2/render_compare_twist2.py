@@ -34,12 +34,34 @@ def quat_rotate_inverse(q, v):
 SHARPA_XML = os.path.join(os.path.dirname(__file__), "..", "..", "deploy", "booster_deploy_supermimic", "robots", "t2", "T2_31dof_sharpa.xml")
 
 
+def delayed_ctrl_step(c, targets, hist: list, delay_steps: int) -> None:
+    """Booster's ctrl_step with a command delay: physics step m sees the newest target issued at or before m - delay.
+    hist holds one target per policy step (numpy, all joints)."""
+    import mujoco
+    targets = targets.cpu().numpy()
+    c.log_states(targets)
+    hist.append(targets)
+    n, D = len(hist) - 1, c.decimation
+    dof_pos = c.mj_data.qpos.astype(np.float32)[7:]
+    dof_vel = c.mj_data.qvel.astype(np.float32)[6:]
+    kp, kd = c.robot.joint_stiffness.numpy(), c.robot.joint_damping.numpy()
+    lim = c.robot.effort_limit.numpy()
+    for i in range(D):
+        j = max(0, n + (i - delay_steps) // D)  # floor division: the command that was already out at this physics step
+        tgt = hist[j]
+        c.mj_data.ctrl = np.clip(kp * (tgt - dof_pos) - kd * dof_vel, -lim, lim)
+        mujoco.mj_step(c.mj_model, c.mj_data)
+        dof_pos = c.mj_data.qpos.astype(np.float32)[7:]
+        dof_vel = c.mj_data.qvel.astype(np.float32)[6:]
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--twist2", required=True)
     p.add_argument("--supermimic", required=True)
     p.add_argument("--twist2_ckpt", default=None, help="override the TWIST2 task checkpoint (absolute .onnx path)")
     p.add_argument("--supermimic_ckpt", default=None, help="override the SuperMimic task checkpoint (absolute .onnx path)")
+    p.add_argument("--delay_ms", type=float, default=0.0, help="command latency added in the MuJoCo PD loop (both robots); Booster's controller itself has none")
     p.add_argument("--sharpa", action="store_true", help="both robots carry the Sharpa wrist inertia (T2_31dof_sharpa.xml); use with the Sharpa-trained policies only")
     p.add_argument("--seconds", type=float, default=12.0)
     p.add_argument("--out", required=True)
@@ -101,9 +123,13 @@ def main() -> None:
     for c in (cs, ct):
         c.update_state()
         c.start()
+    delay_steps = int(round(a.delay_ms / 1000.0 / ms.opt.timestep))
+    hist = {id(cs): [], id(ct): []}
+    step = (lambda c: delayed_ctrl_step(c, c.policy_step(), hist[id(c)], delay_steps)) if delay_steps > 0 else (lambda c: c.ctrl_step(c.policy_step()))
+    print(f"command delay {a.delay_ms:.0f} ms = {delay_steps} physics steps of {ms.opt.timestep * 1000:.0f} ms")
     for _ in range(lead):  # TWIST2 walks its lead-in from the default pose to the clip's first frame
         ct.update_state()
-        ct.ctrl_step(ct.policy_step())
+        step(ct)
 
     d_ref = mujoco.MjData(ms)
     w, h = a.size
@@ -124,7 +150,7 @@ def main() -> None:
     for t in range(steps):
         for c in (cs, ct):
             c.update_state()
-            c.ctrl_step(c.policy_step())
+            step(c)
         k = min(t, clip.num_frames - 1)
         ref_s = clip.joint_pos[k]
         err["supermimic"].append(np.abs(ds.qpos[qadr_s] - ref_s).mean())
