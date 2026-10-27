@@ -84,6 +84,12 @@ def main() -> None:
     fell = torch.zeros(n, dtype=torch.bool, device=env.device)
     vel_err = torch.zeros(n, device=env.device)
     speed = torch.zeros(n, device=env.device)
+    air = torch.zeros(n, device=env.device)  # fraction of feet off the ground (stepping vs shuffling)
+    from supermimic.envs.mdp.loco_rewards import soft_contact
+    from supermimic.envs.state_io import StateIO
+
+    io = StateIO(env)
+    heads = env.loco_heads
     for step in range(steps):
         act = policy(obs["policy"], obs["goal"])
         if step == kick_step:
@@ -100,17 +106,20 @@ def main() -> None:
             v_yaw = quat_apply_inverse(yaw_quat(q), v_w)
             vel_err += torch.linalg.vector_norm(v_yaw[:, :2] - command[:, :2], dim=-1)
             speed += v_yaw[:, 0]
+            contact = soft_contact(heads.bodies(io.read()).feet_pos_w, heads.spec.sole_offset, heads.reward_cfg)
+            air += (contact < 0.5).float().mean(-1)
     vel_err /= steps - kick_step
     speed /= steps - kick_step
+    air /= steps - kick_step
 
     summary = {"ckpt": args.ckpt, "iteration": iteration, "reps": args.reps, "scenarios": {}}
     print(f"[loco eval] {args.ckpt} (iteration {iteration}), {args.reps} envs per scenario")
-    print(f"{'scenario':<20} {'fell':>6} {'vel_err':>8} {'v_fwd':>7}")
+    print(f"{'scenario':<20} {'fell':>6} {'vel_err':>8} {'v_fwd':>7} {'air':>6}")
     for k, name in enumerate(names):
         rows = slice(k * args.reps, (k + 1) * args.reps)
-        f, e, v = float(fell[rows].float().mean()), float(vel_err[rows].mean()), float(speed[rows].mean())
-        summary["scenarios"][name] = {"fell": f, "vel_err": e, "v_fwd": v}
-        print(f"{name:<20} {f:>6.2f} {e:>8.3f} {v:>7.3f}")
+        f, e, v, a = float(fell[rows].float().mean()), float(vel_err[rows].mean()), float(speed[rows].mean()), float(air[rows].mean())
+        summary["scenarios"][name] = {"fell": f, "vel_err": e, "v_fwd": v, "air": a}
+        print(f"{name:<20} {f:>6.2f} {e:>8.3f} {v:>7.3f} {a:>6.2f}")
     out = Path(args.out) if args.out else Path(args.ckpt).with_name(f"eval_loco_{iteration}.json")
     out.write_text(json.dumps(summary, indent=2))
     print(f"[loco eval] written {out}")
