@@ -18,6 +18,11 @@ from supermimic.world_model.wm_trainer import LocoWorldModelTrainer
 class LocoTrainer(Trainer):
     def _build(self) -> None:
         cfg = self.cfg
+        rsi_files = None
+        if cfg.loco.rsi_dir is not None:
+            from supermimic.envs.mdp.motion_library import discover_npz
+
+            rsi_files = [str(f) for f in discover_npz(cfg.loco.rsi_dir, names=cfg.loco.rsi_clips)]
         self.env = make_loco_env(
             LocoEnvCfgArgs(
                 robot=cfg.env.robot,
@@ -31,6 +36,8 @@ class LocoTrainer(Trainer):
                 seed=cfg.seed + 1000 * self.rank,
                 resampling_time_range=cfg.loco.resampling_time_range,
                 rel_standing_envs=cfg.loco.rel_standing_envs,
+                rsi_npz_files=rsi_files,
+                rsi_prob=cfg.loco.rsi_prob,
             ),
             device=self.device,
             reward_cfg=cfg.loco.reward,

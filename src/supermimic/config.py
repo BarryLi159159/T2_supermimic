@@ -49,6 +49,9 @@ class LocoCfg:
     rel_standing_envs: float = 0.4
     curriculum_start: int = 50_000  # iterations over which the torso command ranges widen (Isaac: 20k-60k PPO it)
     curriculum_end: int = 250_000
+    rsi_dir: Path | None = None  # reference-state initialisation: start rsi_prob of the episodes from these clips
+    rsi_clips: list[str] | None = None  # clip names (None = every npz in rsi_dir)
+    rsi_prob: float = 0.5
     reward: LocoRewardCfg = field(default_factory=LocoRewardCfg)
     policy: LocoPolicyCfg = field(default_factory=LocoPolicyCfg)
     critic: LocoCriticCfg = field(default_factory=LocoCriticCfg)

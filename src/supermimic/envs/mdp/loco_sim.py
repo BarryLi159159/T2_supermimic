@@ -1,5 +1,9 @@
 """mjlab-side terms of the locomotion task, all evaluated through the analytic heads on the simulator state.
 
+``reset_from_clip`` is the locomotion task's reference-state initialisation: a fraction of the resets start from a
+random frame of a motion clip (the T2 walking clips), so the replay buffer and the world model see stepping
+dynamics that a shuffling policy never produces (t2_loco_v1 / v2, 2026-10-27).
+
 The reward term, the policy observation terms and the termination read ``LocoHeads`` (``world_model/loco_heads.py``)
 on the state the simulator has just reached, so the MuJoCo reward is the very function the policy is optimised on
 in imagination. The heads are built once per env (``env.loco_heads``) by ``make_loco_env``.
@@ -74,3 +78,29 @@ def reset_joints_by_scale(env: ManagerBasedRlEnv, env_ids: torch.Tensor | None, 
     lim = robot.data.soft_joint_pos_limits[env_ids]
     q = q.clamp(lim[..., 0], lim[..., 1])
     robot.write_joint_state_to_sim(q, torch.zeros_like(q), env_ids=env_ids)
+
+
+def reset_from_clip(env: ManagerBasedRlEnv, env_ids: torch.Tensor | None, npz_files: list[str], prob: float, robot_name: str, asset_cfg: SceneEntityCfg = _ROBOT) -> None:
+    """Start a ``prob`` fraction of the resetting envs from a random frame of the clips (pose and velocity)."""
+    from supermimic.envs.mdp.motion_library import MotionLibrary
+    from supermimic.robots import get_robot
+
+    robot = env.scene[asset_cfg.name]
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    lib = getattr(env, "rsi_library", None)
+    if lib is None:
+        spec = get_robot(robot_name)
+        lib = MotionLibrary(npz_files, spec.tracked_bodies, robot.data.default_joint_pos[0], device=env.device, compact=True, root_body_name=spec.root_body, fk_model=spec.load_model())
+        env.rsi_library = lib
+        print(f"[INFO] reset_from_clip: {lib.summary()}")
+    pick = env_ids[torch.rand(env_ids.numel(), device=env.device) < prob]
+    if pick.numel() == 0:
+        return
+    frame = torch.randint(0, lib.num_frames, (pick.numel(),), device=env.device)
+    r = lib.ref(frame)
+    lim = robot.data.soft_joint_pos_limits[pick]
+    joint_pos = r.joint_pos.clamp(lim[..., 0], lim[..., 1])
+    robot.write_joint_state_to_sim(joint_pos, r.joint_vel, env_ids=pick)
+    root = torch.cat([r.root_pos_w + env.scene.env_origins[pick], r.root_quat_w, r.root_lin_vel_w, r.root_ang_vel_w], dim=-1)
+    robot.write_root_state_to_sim(root, env_ids=pick)

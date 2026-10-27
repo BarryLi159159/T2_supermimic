@@ -60,6 +60,8 @@ class LocoEnvCfgArgs:
     resampling_time_range: tuple[float, float] = (3.0, 6.0)
     rel_standing_envs: float = 0.4
     min_pelvis_height: float = LocoTerminationCfg().min_pelvis_height
+    rsi_npz_files: list[str] | None = None  # reference-state initialisation clips (None = off)
+    rsi_prob: float = 0.5
 
 
 def make_loco_env_cfg(a: LocoEnvCfgArgs) -> ManagerBasedRlEnvCfg:
@@ -161,6 +163,13 @@ def make_loco_env_cfg(a: LocoEnvCfgArgs) -> ManagerBasedRlEnvCfg:
         func=loco_sim.reset_joints_by_scale,
         params={"position_range": (0.5, 1.5) if a.reset_noise else (1.0, 1.0), "asset_cfg": SceneEntityCfg("robot")},
     )
+
+    if a.rsi_npz_files:
+        events["reset_from_clip"] = EventTermCfg(
+            mode="reset",
+            func=loco_sim.reset_from_clip,
+            params={"npz_files": list(a.rsi_npz_files), "prob": a.rsi_prob, "robot_name": a.robot, "asset_cfg": SceneEntityCfg("robot")},
+        )
 
     rewards = {
         "loco": RewardTermCfg(func=loco_sim.loco_reward, weight=1.0, params={"command_name": "velocity", "action_name": "joint_pos"}),
