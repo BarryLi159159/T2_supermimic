@@ -22,7 +22,6 @@ from supermimic.training.distributed import (
     broadcast_params,
     finalize,
     init_distributed,
-    world_size,
 )
 from supermimic.training.schedule import cosine_lr
 from supermimic.world_model.heads import AnalyticHeads
@@ -52,7 +51,25 @@ class Trainer:
                 json.dumps(asdict(cfg), indent=2, default=str)
             )
         self.writer = SummaryWriter(str(self.log_dir / "tb")) if self.is_main else None
+        self._build()
 
+        # Episode statistics of the training env (paper's "training return").
+        env = self.env
+        self.ep_reward_sum = torch.zeros(env.num_envs, device=self.device)
+        self.ep_len = torch.zeros(env.num_envs, device=self.device)
+        self.iteration = 0
+        self.num_updates = 0
+        self._utd_acc = 0.0
+        if cfg.resume is not None:
+            self.load(cfg.resume)
+        elif cfg.finetune is not None:
+            self.load_weights(cfg.finetune)
+
+    # ------------------------------------------------------------------ task-specific construction and hooks
+
+    def _build(self) -> None:
+        """Env, world model, policy, critic and their trainers (the motion-tracking task)."""
+        cfg = self.cfg
         if cfg.data.library is not None:
             files = [cfg.data.library]
             cfg.env.compact_library = True
@@ -111,23 +128,33 @@ class Trainer:
         self.policy_trainer = PolicyTrainer(
             self.wm, self.policy, self.critic, self.lib, cfg.policy_trainer
         )
-        n_params = lambda m: sum(p.numel() for p in m.parameters())  # noqa: E731
+        self.max_step_reward = heads.reward_cfg.max_step_reward
+        self._print_params()
+
+    def _print_params(self) -> None:
+        n_params = lambda m: sum(p.numel() for p in m.parameters())
         if self.is_main:
             print(
                 f"[INFO] params: world model {n_params(self.wm) / 1e6:.2f}M, policy {n_params(self.policy) / 1e6:.2f}M, critic {n_params(self.critic) / 1e6:.3f}M"
             )
 
-        # Episode statistics of the training env (paper's "training return").
-        self.ep_reward_sum = torch.zeros(env.num_envs, device=self.device)
-        self.ep_len = torch.zeros(env.num_envs, device=self.device)
-        self.max_step_reward = heads.reward_cfg.max_step_reward
-        self.iteration = 0
-        self.num_updates = 0
-        self._utd_acc = 0.0
-        if cfg.resume is not None:
-            self.load(cfg.resume)
-        elif cfg.finetune is not None:
-            self.load_weights(cfg.finetune)
+    def _sampler_state(self) -> dict:
+        """Task state saved with a checkpoint (the return-based sampler's bins)."""
+        return {"bin_return": self.command.bin_return, "bin_memory": self.command.bin_memory}
+
+    def _load_sampler_state(self, ck: dict) -> None:
+        self.command.bin_return.copy_(ck["bin_return"])
+        self.command.bin_memory.copy_(ck["bin_memory"])
+
+    def _extra_scalars(self) -> dict[str, float]:
+        """Task scalars logged at every log interval."""
+        return {
+            "sampler/entropy": float(self.command.metrics["sampling_entropy"][0]),
+            "sampler/bin_return_mean": float(self.command.bin_return.mean()),
+        }
+
+    def _on_log(self, iteration: int) -> None:
+        """Per-log-interval task hook (curricula)."""
 
     # ------------------------------------------------------------------ checkpoints
 
@@ -144,8 +171,7 @@ class Trainer:
                 "wm_opt": self.wm_trainer.opt.state_dict(),
                 "policy_opt": self.policy_trainer.opt.state_dict(),
                 "critic_opt": self.policy_trainer.critic_opt.state_dict(),
-                "bin_return": self.command.bin_return,
-                "bin_memory": self.command.bin_memory,
+                **self._sampler_state(),
                 "config": asdict(self.cfg),
             },
             self.log_dir / name,
@@ -190,8 +216,7 @@ class Trainer:
         self.wm_trainer.opt.load_state_dict(ck["wm_opt"])
         self.policy_trainer.opt.load_state_dict(ck["policy_opt"])
         self.policy_trainer.critic_opt.load_state_dict(ck["critic_opt"])
-        self.command.bin_return.copy_(ck["bin_return"])
-        self.command.bin_memory.copy_(ck["bin_memory"])
+        self._load_sampler_state(ck)
         print(
             f"[INFO] fine-tune from {path} (iteration {ck['iteration']}): weights, Adam moments and sampler state loaded, schedule fresh"
         )
@@ -204,8 +229,7 @@ class Trainer:
         self.wm_trainer.opt.load_state_dict(ck["wm_opt"])
         self.policy_trainer.opt.load_state_dict(ck["policy_opt"])
         self.policy_trainer.critic_opt.load_state_dict(ck["critic_opt"])
-        self.command.bin_return.copy_(ck["bin_return"])
-        self.command.bin_memory.copy_(ck["bin_memory"])
+        self._load_sampler_state(ck)
         self.iteration = ck["iteration"]
         self.num_updates = ck["num_updates"]
         print(f"[INFO] resumed from {path} at iteration {self.iteration}")
@@ -287,6 +311,7 @@ class Trainer:
             # ---------------- logging / checkpoints
             if self.iteration % sch.log_interval == 0:
                 it = self.iteration
+                self._on_log(it)
                 elapsed = time.time() - t_start
                 if self.world > 1:
                     # Every rank must issue the same collectives: reduce (sum, count) unconditionally.
@@ -325,12 +350,8 @@ class Trainer:
                         self.writer.add_scalar(f"time/{k}_s_per_iter", v / sch.log_interval, it)
                     self.writer.add_scalar("time/hours", elapsed / 3600, it)
                     self.writer.add_scalar("time/updates", self.num_updates, it)
-                    self.writer.add_scalar(
-                        "sampler/entropy", float(self.command.metrics["sampling_entropy"][0]), it
-                    )
-                    self.writer.add_scalar(
-                        "sampler/bin_return_mean", float(self.command.bin_return.mean()), it
-                    )
+                    for k, v in self._extra_scalars().items():
+                        self.writer.add_scalar(k, v, it)
                     dt_log = time.time() - last_log
                     last_log = time.time()
                     msg = (

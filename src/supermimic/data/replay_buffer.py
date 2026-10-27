@@ -24,6 +24,7 @@ class WindowBatch:
     reward: torch.Tensor  # (k, n)
     done: torch.Tensor  # (k, n) termination label of states 1..k
     frame: torch.Tensor  # (k, n) target frame of each transition
+    goal: torch.Tensor  # (k, n, G) goal vector of each transition (locomotion command; G = 0 for tracking)
 
 
 @dataclass
@@ -34,15 +35,17 @@ class StartBatch:
     prev_action: torch.Tensor  # (n, A) clean action of the previous step (0 at episode start)
     hist_states: torch.Tensor  # (hist, n, S) states s_{t-hist+1..t} (backfilled at episode start)
     hist_actions: torch.Tensor  # (hist, n, A) clean actions a_{t-hist..t-1} aligned with hist_states' obs
+    goal: torch.Tensor  # (n, G) goal vector active at the start row
 
 
 class ReplayBuffer:
-    def __init__(self, num_envs: int, capacity: int, state_dim: int, act_dim: int, xi_dim: int, device):
+    def __init__(self, num_envs: int, capacity: int, state_dim: int, act_dim: int, xi_dim: int, device, goal_dim: int = 0):
         self.E, self.T = num_envs, capacity
         self.device = torch.device(device)
         E, T = num_envs, capacity
-        f = lambda *shape: torch.zeros(E, T, *shape, device=self.device)  # noqa: E731
+        f = lambda *shape: torch.zeros(E, T, *shape, device=self.device)
         self.s = f(state_dim)
+        self.g = f(goal_dim)
         self.a = f(act_dim)
         self.a_exec = f(act_dim)
         self.xi = f(xi_dim)
@@ -62,9 +65,11 @@ class ReplayBuffer:
     # ------------------------------------------------------------------ writes
 
     @torch.no_grad()
-    def add(self, env_ids, s, a, a_exec, xi, r, done, frame, clip, terminal, ep_start) -> None:
+    def add(self, env_ids, s, a, a_exec, xi, r, done, frame, clip, terminal, ep_start, goal=None) -> None:
         p = self.ptr[env_ids]
         self.s[env_ids, p] = s
+        if goal is not None:
+            self.g[env_ids, p] = goal
         self.a[env_ids, p] = a
         self.a_exec[env_ids, p] = a_exec
         self.xi[env_ids, p] = xi
@@ -134,6 +139,7 @@ class ReplayBuffer:
             reward=self.r[ee[:-1], tt[:-1]],
             done=self.done[ee[1:], tt[1:]],
             frame=self.frame[ee[:-1], tt[:-1]],
+            goal=self.g[ee[:-1], tt[:-1]],
         )
 
     @torch.no_grad()
@@ -164,4 +170,5 @@ class ReplayBuffer:
             prev_action=hist_actions[-1],
             hist_states=hist_states,
             hist_actions=hist_actions,
+            goal=self.g[e, t],
         )

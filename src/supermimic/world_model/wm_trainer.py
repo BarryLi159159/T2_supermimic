@@ -8,8 +8,8 @@ import torch
 
 from supermimic.data.replay_buffer import ReplayBuffer, WindowBatch
 from supermimic.envs.mdp.motion_library import MotionLibrary
-from supermimic.world_model.heads import ReferenceFrame
 from supermimic.training.distributed import allreduce_grads
+from supermimic.world_model.heads import ReferenceFrame
 from supermimic.world_model.world_model import WorldModel
 
 
@@ -31,7 +31,7 @@ def reference_at(lib: MotionLibrary, frame: torch.Tensor) -> ReferenceFrame:
 
 
 class WorldModelTrainer:
-    def __init__(self, wm: WorldModel, lib: MotionLibrary, cfg: WMTrainerCfg):
+    def __init__(self, wm: WorldModel, lib: MotionLibrary | None, cfg: WMTrainerCfg):
         self.wm = wm
         self.lib = lib
         self.cfg = cfg
@@ -71,3 +71,13 @@ class WorldModelTrainer:
         """k-step open-loop error on (recent) replay windows; (k,) tensor."""
         w = buffer.sample_windows(n, k)
         return self.wm.rollout_error(w.states, w.a_exec, w.xi)
+
+
+class LocoWorldModelTrainer(WorldModelTrainer):
+    """The same fit for the locomotion world model, whose termination features need no reference frame."""
+
+    def __init__(self, wm: WorldModel, cfg: WMTrainerCfg):
+        super().__init__(wm, None, cfg)
+
+    def loss_on(self, w: WindowBatch):
+        return self.wm.window_loss(w.states, w.a_exec, w.xi, w.done)
