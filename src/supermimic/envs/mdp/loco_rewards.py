@@ -70,10 +70,12 @@ class LocoRewardCfg:
     knee_std: float = 0.1
     # Not in the Isaac table: feet_air_time (contact timers) has no state-only form, and without a gait term the first
     # world-model run (t2_loco_v1, 2026-10-27) walked at 0.28 m/s with both feet always on the ground. A moving robot is
-    # rewarded for a foot that is off the ground near the swing height; the fly penalty keeps it from lifting both.
+    # rewarded for a foot near the swing height with a wide Gaussian in the sole height, so the gradient is alive from
+    # the ground up (the world model predicts a standing foot 1-2 cm below the ground; a contact-gated term, v2-v4,
+    # was flat there and the policy never lifted a foot). The fly penalty keeps it from lifting both.
     w_feet_swing: float = 0.5
     swing_height: float = 0.08
-    swing_std: float = 0.05
+    swing_std: float = 0.08
     w_feet_contact_standing: float = 0.5
     w_feet_flat_standing: float = 0.175
     feet_flat_dead_zone_deg: float = 3.0
@@ -243,7 +245,7 @@ def loco_reward_terms(
     feet_flat_standing = standing * both_down * pose_gate * flatness
     feet_contact_standing = standing * both_down
     sole_z = b.feet_pos_w[..., 2] - sole_offset
-    swing = ((1.0 - contact) * torch.exp(-((sole_z - cfg.swing_height) ** 2) / cfg.swing_std**2)).sum(-1)
+    swing = torch.exp(-((sole_z - cfg.swing_height) ** 2) / cfg.swing_std**2).sum(-1)
     feet_swing = (1.0 - standing) * swing
 
     # ---- posture
