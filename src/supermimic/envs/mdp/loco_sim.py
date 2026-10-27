@@ -46,10 +46,13 @@ class loco_reward:
         # The reset state is written after this reward's reset; prev_state is refreshed on the next call.
         pass
 
-    def __call__(self, env: ManagerBasedRlEnv, command_name: str = "velocity", action_name: str = "joint_pos") -> torch.Tensor:
+    def __call__(self, env: ManagerBasedRlEnv, command_name: str = "velocity", action_name: str = "joint_pos", gait_clock: bool = False) -> torch.Tensor:
         heads = heads_of(env)
         term = env.action_manager.get_term(action_name)
-        cmd = env.command_manager.get_term(command_name).command
+        cmd_term = env.command_manager.get_term(command_name)
+        # With the gait clock the reward sees the goal the policy sees (the reward runs before the command term
+        # advances the phase, so this is the phase the policy acted on).
+        cmd = torch.cat([cmd_term.command, cmd_term.clock], dim=-1) if gait_clock else cmd_term.command
         s = self.io.read()
         # Envs reset since the previous call start a fresh episode: their previous state is unknown, use the current one.
         fresh = env.episode_length_buf <= 1
@@ -59,6 +62,11 @@ class loco_reward:
         self.prev_state = s
         self.last_terms = terms
         return terms["total"] / env.step_dt  # the manager multiplies by dt
+
+
+def gait_clock(env: ManagerBasedRlEnv, command_name: str = "velocity") -> torch.Tensor:
+    """[sin, cos] of the command term's gait phase (the goal group's second term)."""
+    return env.command_manager.get_term(command_name).clock
 
 
 def pelvis_height_below(env: ManagerBasedRlEnv, body_name: str, minimum_height: float, asset_cfg: SceneEntityCfg = _ROBOT) -> torch.Tensor:

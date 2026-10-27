@@ -135,12 +135,13 @@ class LocoHeads:
         )
 
     def observation(self, s: torch.Tensor, prev_action15: torch.Tensor, cmd: torch.Tensor, xi: torch.Tensor) -> torch.Tensor:
-        """Noise-free 58-d policy observation. xi[..., 1:30] is the encoder bias (observed q = q + bias)."""
+        """Noise-free 58-d policy observation. xi[..., 1:30] is the encoder bias (observed q = q + bias). ``cmd`` may
+        carry the gait clock after the 7 command numbers; the observation holds the command only."""
         _, root_quat, q, _, ang_b, qd = split_state(s)
         bias = xi[..., 1:30]
         ids = self.policy_ids
         q_obs = (q + bias - self.default_joint_pos)[..., ids]
-        return torch.cat([ang_b, projected_gravity(root_quat), cmd, q_obs, qd[..., ids], prev_action15], dim=-1)
+        return torch.cat([ang_b, projected_gravity(root_quat), cmd[..., :CMD_DIM], q_obs, qd[..., ids], prev_action15], dim=-1)
 
     def termination_features(self, bodies: LocoBodies) -> torch.Tensor:
         """[pelvis height above the threshold, pelvis tilt (1 + g_z, 0 upright)] (…, 2)."""

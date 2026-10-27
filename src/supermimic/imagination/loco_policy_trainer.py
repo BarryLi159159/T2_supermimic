@@ -42,7 +42,7 @@ class LocoPolicyTrainer:
         with torch.set_grad_enabled(train_actor):
             ro = loco_imagine(self.wm, self.policy, start, cfg.horizon, obs_noise=cfg.obs_noise, step_fn=self.step_fn)
             feat = self._critic_feat(ro)
-            v_H = self.critic(feat[-1], ro.cmd, xi_norm) if cfg.use_critic else None
+            v_H = self.critic(feat[-1], ro.cmd[-1], xi_norm) if cfg.use_critic else None
             J = policy_objective(ro, v_H, cfg.gamma)
         if train_actor:
             loss = -J / cfg.horizon
@@ -78,7 +78,7 @@ class LocoPolicyTrainer:
             with torch.no_grad():
                 feat_d = feat.detach()
                 H1, n, _ = feat_d.shape
-                cmd_rep = ro.cmd[None].expand(H1, n, -1)
+                cmd_rep = ro.cmd
                 xi_rep = xi_norm[None].expand(H1, n, -1)
                 values = self.critic(feat_d.reshape(H1 * n, -1), cmd_rep.reshape(H1 * n, -1), xi_rep.reshape(H1 * n, -1)).reshape(H1, n)
                 targets = gae_targets(ro.rewards.detach(), ro.dhat[1:].detach(), values, cfg.gamma, cfg.gae_lambda)

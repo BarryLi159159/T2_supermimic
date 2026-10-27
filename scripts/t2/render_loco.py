@@ -43,7 +43,7 @@ def main() -> None:
     spec = get_robot(cfg["env"]["robot"])
     n = len(args.scenarios)
     env = make_loco_env(
-        LocoEnvCfgArgs(robot=spec.name, num_envs=n, episode_length_s=1.0e5, action_noise_std=0.0, obs_noise=False, reset_noise=False, domain_randomization=False, record_transitions=False, seed=0),
+        LocoEnvCfgArgs(robot=spec.name, num_envs=n, episode_length_s=1.0e5, action_noise_std=0.0, obs_noise=False, reset_noise=False, domain_randomization=False, record_transitions=False, gait_clock=cfg["loco"].get("gait_clock", False), seed=0),
         device=args.device,
     )
     robot = env.scene["robot"]

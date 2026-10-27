@@ -1,7 +1,7 @@
 """Imagined rollouts of the locomotion policy through the world model (paper §3.3, velocity-command edition).
 
 The command of the start row is held for the whole horizon (it is piecewise constant over seconds; the horizon is
-0.64 s). The arm joints keep the start row's normalised targets; the policy's 15 outputs are scattered into the
+0.64 s); a gait clock after it (9-d goal) advances one control step per imagined step, as in the simulator. The arm joints keep the start row's normalised targets; the policy's 15 outputs are scattered into the
 29-d action the dynamics network consumes. The reward uses the termination probability as the termination
 penalty's expectation.
 """
@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import torch
 
 from supermimic.data.replay_buffer import StartBatch
-from supermimic.envs.mdp.loco_rewards import LOCO_REWARD_TERM_NAMES
+from supermimic.envs.mdp.loco_rewards import LOCO_REWARD_TERM_NAMES, advance_clock
 from supermimic.policy.loco_nets import LocoPolicy
 from supermimic.world_model.loco_heads import LOCO_OBS_TERMS, LocoWorldModel
 
@@ -28,7 +28,7 @@ class LocoRollout:
     rewards: torch.Tensor  # (H, n)      r_{t+1}
     dhat: torch.Tensor  # (H+1, n)    predicted termination prob of s_t (d_0 = 0)
     survival: torch.Tensor  # (H+1, n)    c_t
-    cmd: torch.Tensor  # (n, 7)
+    cmd: torch.Tensor  # (H+1, n, G) goal at each state (G = 7, or 9 with the gait clock)
     reward_terms: dict  # mean of each reward term over the rollout (diagnostics)
 
 
@@ -80,6 +80,8 @@ def loco_imagine(wm: LocoWorldModel, policy: LocoPolicy, start: StartBatch, hori
     step_fn = step_fn or LocoImagStep(wm)
     noise_half = LOCO_OBS_NOISE_HALF.to(device)
     cmd = start.goal
+    has_clock = cmd.shape[-1] > 7
+    rcfg = heads.reward_cfg
 
     def add_noise(o):
         if obs_noise:
@@ -95,6 +97,7 @@ def loco_imagine(wm: LocoWorldModel, policy: LocoPolicy, start: StartBatch, hori
     actions, rewards = [], []
     dhats, survivals = [torch.zeros(n, device=device)], [c]
     term_sum = torch.zeros(len(LOCO_REWARD_TERM_NAMES), device=device)
+    cmds = [cmd]
 
     for _ in range(horizon):
         obs_flat = flatten_term_major(torch.stack(hist, 0))
@@ -104,6 +107,9 @@ def loco_imagine(wm: LocoWorldModel, policy: LocoPolicy, start: StartBatch, hori
         c = c * (1.0 - d)
         term_sum += term_vec.detach().mean(-1)
         hist = hist[1:] + [add_noise(obs_clean)]
+        if has_clock:
+            cmd = torch.cat([cmd[..., :7], advance_clock(cmd[..., 7:], rcfg.dt, rcfg.gait_period)], dim=-1)
+        cmds.append(cmd)
         a_prev = a
         s = s_next
         states.append(s)
@@ -118,6 +124,6 @@ def loco_imagine(wm: LocoWorldModel, policy: LocoPolicy, start: StartBatch, hori
         rewards=torch.stack(rewards),
         dhat=torch.stack(dhats),
         survival=torch.stack(survivals),
-        cmd=cmd,
+        cmd=torch.stack(cmds),
         reward_terms={k: float(v / horizon) for k, v in zip(LOCO_REWARD_TERM_NAMES, term_sum.tolist())},
     )

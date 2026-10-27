@@ -62,6 +62,8 @@ class LocoEnvCfgArgs:
     min_pelvis_height: float = LocoTerminationCfg().min_pelvis_height
     rsi_npz_files: list[str] | None = None  # reference-state initialisation clips (None = off)
     rsi_prob: float = 0.5
+    gait_clock: bool = False  # the goal (policy input, replay) carries the gait clock: 9-d instead of 7-d
+    gait_period: float = 0.8
 
 
 def make_loco_env_cfg(a: LocoEnvCfgArgs) -> ManagerBasedRlEnvCfg:
@@ -87,7 +89,10 @@ def make_loco_env_cfg(a: LocoEnvCfgArgs) -> ManagerBasedRlEnvCfg:
             flatten_history_dim=True,
         ),
         "goal": ObservationGroupCfg(
-            terms={"command": ObservationTermCfg(func=base_mdp.generated_commands, params={"command_name": "velocity"})},
+            terms={
+                "command": ObservationTermCfg(func=base_mdp.generated_commands, params={"command_name": "velocity"}),
+                **({"gait_clock": ObservationTermCfg(func=loco_sim.gait_clock, params={"command_name": "velocity"})} if a.gait_clock else {}),
+            },
             concatenate_terms=True,
             enable_corruption=False,
         ),
@@ -109,6 +114,7 @@ def make_loco_env_cfg(a: LocoEnvCfgArgs) -> ManagerBasedRlEnvCfg:
         "velocity": VelocityBodyCommandCfg(
             resampling_time_range=a.resampling_time_range,
             rel_standing_envs=a.rel_standing_envs,
+            gait_period=a.gait_period,
         )
     }
 
@@ -172,7 +178,7 @@ def make_loco_env_cfg(a: LocoEnvCfgArgs) -> ManagerBasedRlEnvCfg:
         )
 
     rewards = {
-        "loco": RewardTermCfg(func=loco_sim.loco_reward, weight=1.0, params={"command_name": "velocity", "action_name": "joint_pos"}),
+        "loco": RewardTermCfg(func=loco_sim.loco_reward, weight=1.0, params={"command_name": "velocity", "action_name": "joint_pos", "gait_clock": a.gait_clock}),
     }
 
     terminations = {
@@ -192,6 +198,7 @@ def make_loco_env_cfg(a: LocoEnvCfgArgs) -> ManagerBasedRlEnvCfg:
                 "com_body_name": robot.com_body,
                 "command_name": "velocity",
                 "action_name": "joint_pos",
+                "gait_clock": a.gait_clock,
             }
         )
 

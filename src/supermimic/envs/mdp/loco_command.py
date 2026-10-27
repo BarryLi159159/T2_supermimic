@@ -6,6 +6,10 @@ in the per-axis ranges every ``resampling_time_range`` seconds; a fraction of th
 half of the moving envs get an exact zero yaw rate (IsaacLab-Decoupled-WBC's ``UniformVelocityBodyCommand`` without
 the heading-feedback mode, which has no constant-goal form).
 
+The term also runs a gait clock: a phase in [0, 1) per env, random at reset, advancing by ``step_dt / gait_period``
+every step. ``clock`` = [sin 2 pi phase, cos 2 pi phase] is the timing of the swing-foot height reference
+(``feet_phase`` in ``loco_rewards.py``); the env exposes it to the policy only when the task enables it.
+
 The torso axes widen from ``*_start`` to the full ranges with ``progress`` in [0, 1] (the Isaac per-axis curriculum;
 the trainer sets it from the iteration). Evaluation pins a command with ``set_fixed``.
 """
@@ -22,6 +26,7 @@ if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
 CMD_DIM = 7
+CLOCK_DIM = 2
 AXES = ("lin_vel_x", "lin_vel_y", "ang_vel_z", "body_height", "body_roll", "body_pitch", "body_yaw")
 
 
@@ -36,12 +41,23 @@ class VelocityBodyCommand(CommandTerm):
         self.fixed = torch.zeros(n, dtype=torch.bool, device=self.device)
         self.fixed_command = torch.zeros(n, CMD_DIM, device=self.device)
         self.progress = 0.0
+        self.phase = torch.zeros(n, device=self.device)
         self.metrics["error_vel_xy"] = torch.zeros(n, device=self.device)
         self.metrics["error_vel_yaw"] = torch.zeros(n, device=self.device)
 
     @property
     def command(self) -> torch.Tensor:
         return self.vel_command_b
+
+    @property
+    def clock(self) -> torch.Tensor:
+        """(n, 2) [sin, cos] of the gait phase."""
+        angle = 2.0 * torch.pi * self.phase
+        return torch.stack([torch.sin(angle), torch.cos(angle)], dim=-1)
+
+    def reset(self, env_ids):
+        self.phase[env_ids] = torch.rand(len(env_ids), device=self.device)
+        return super().reset(env_ids)
 
     # ------------------------------------------------------------------ curriculum / evaluation hooks
 
@@ -77,8 +93,14 @@ class VelocityBodyCommand(CommandTerm):
         if fixed.any():
             self.vel_command_b[env_ids] = torch.where(fixed.unsqueeze(-1), self.fixed_command[env_ids], self.vel_command_b[env_ids])
 
+    def compute(self, dt, env_ids=None) -> None:
+        self._dt = dt  # scalar, or per env on the auto-reset path (0 for the envs that just reset)
+        super().compute(dt, env_ids)
+
     def _update_command(self, env_ids: torch.Tensor | None) -> None:
-        pass  # piecewise constant between resamples
+        # The command is piecewise constant between resamples; only the gait clock moves, on the per-step path.
+        if env_ids is None:
+            self.phase = (self.phase + self._dt / self.cfg.gait_period) % 1.0
 
     def _update_metrics(self) -> None:
         robot = self._env.scene[self.cfg.entity_name]
@@ -93,6 +115,7 @@ class VelocityBodyCommandCfg(CommandTermCfg):
     resampling_time_range: tuple[float, float] = (3.0, 6.0)
     rel_standing_envs: float = 0.4
     rel_zero_yaw_envs: float = 0.5  # of the moving envs
+    gait_period: float = 0.8  # s, one stride (each foot swings for half of it)
     # Full ranges (Booster_T2 config/t2_flat_config.py: G1's table, height scaled, roll capped at T2's 0.50).
     lin_vel_x: tuple[float, float] = (-0.5, 0.5)
     lin_vel_y: tuple[float, float] = (-0.5, 0.5)

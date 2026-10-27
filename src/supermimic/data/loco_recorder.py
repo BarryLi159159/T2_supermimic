@@ -9,7 +9,7 @@ from mjlab.managers.recorder_manager import RecorderTermCfg
 
 from supermimic.data.recorder import ReplayRecorder
 from supermimic.data.replay_buffer import ReplayBuffer
-from supermimic.envs.mdp.loco_command import CMD_DIM
+from supermimic.envs.mdp.loco_command import CLOCK_DIM, CMD_DIM
 from supermimic.envs.sim_context import XI_DIM
 from supermimic.envs.state_io import STATE_DIM
 
@@ -18,13 +18,16 @@ class LocoReplayRecorder(ReplayRecorder):
     def __init__(self, cfg: LocoReplayRecorderCfg, env):
         super().__init__(cfg, env)
         n = env.num_envs
-        self.buffer = ReplayBuffer(n, int(cfg.params["capacity"]), STATE_DIM, 29, XI_DIM, env.device, goal_dim=CMD_DIM)
-        self.prev_cmd = torch.zeros(n, CMD_DIM, device=env.device)
+        self.gait_clock = bool(cfg.params.get("gait_clock", False))
+        goal_dim = CMD_DIM + (CLOCK_DIM if self.gait_clock else 0)
+        self.buffer = ReplayBuffer(n, int(cfg.params["capacity"]), STATE_DIM, 29, XI_DIM, env.device, goal_dim=goal_dim)
+        self.prev_cmd = torch.zeros(n, goal_dim, device=env.device)
 
     def _remember(self, ids: torch.Tensor) -> None:
         self.prev_s[ids] = self.state_io.read()[ids]
         self.prev_xi[ids] = self.ctx.read()[ids]
-        self.prev_cmd[ids] = self.command.command[ids]
+        cmd = self.command
+        self.prev_cmd[ids] = torch.cat([cmd.command[ids], cmd.clock[ids]], dim=-1) if self.gait_clock else cmd.command[ids]
 
     def _write_rows(self, ids: torch.Tensor, done_next: torch.Tensor) -> None:
         env = self._env

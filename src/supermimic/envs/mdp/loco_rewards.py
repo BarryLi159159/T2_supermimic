@@ -10,6 +10,11 @@ the actuator PD law. Three Isaac terms need contact sensors and have no state-on
 indicator of the sole height (``sigmoid((h - sole_z) / w)``), which makes the fly / slide / standing-contact
 terms differentiable.
 
+When the command carries the gait clock (``cmd[..., 7:9]`` = [sin, cos] of the phase), ``feet_phase`` replaces
+``feet_air_time``: an L1 penalty between each sole height and a swing reference (left foot swings in the first half
+of the stride, right in the second, half-sine arcs of ``swing_height``). It is dense and its gradient does not
+vanish at the ground, unlike every contact-gated or air-time form (v1-v6 stood or shuffled).
+
 Rewards are returned already weighted and multiplied by ``dt`` like mjlab's reward manager.
 """
 
@@ -74,9 +79,12 @@ class LocoRewardCfg:
     # predicts a standing foot 1-2 cm under it, where a contact-gated term, v2-v4, had no gradient) to the swing
     # height, so the gradient is constant from the ground up and a real swing earns the full term (a wide Gaussian,
     # v5, paid 40 % of it for standing). The fly penalty keeps the robot from lifting both feet.
-    w_feet_swing: float = 0.5
+    w_feet_swing: float = 0.0
     swing_height: float = 0.08
     swing_floor: float = -0.015
+    # Gait-clock swing reference (t2_loco_v7): -w * sum_feet |sole_z - z_ref(phase)| while moving.
+    w_feet_phase: float = -10.0
+    gait_period: float = 0.8  # s, must match the command term's
     w_feet_contact_standing: float = 0.5
     w_feet_flat_standing: float = 0.175
     feet_flat_dead_zone_deg: float = 3.0
@@ -107,9 +115,10 @@ class LocoRewardCfg:
     soft_torque_ankle: float = 0.99
     w_torque_limit_hip_pitch: float = -100.0
     soft_torque_hip_pitch: float = 0.99
-    # soft foot contact from the sole height
-    contact_height: float = 0.01
-    contact_width: float = 0.01
+    # Soft foot contact from the sole height: ~1 below 0.5 cm, ~0 above 2.5 cm. Until v6 it was (0.01, 0.01), which
+    # gave a planted foot (sole -0.1 cm) only 0.75: standing paid fly 0.06 and lifting one foot quadrupled it.
+    contact_height: float = 0.015
+    contact_width: float = 0.004
     standing_cmd_threshold: float = 0.1
 
     @property
@@ -179,6 +188,20 @@ def soft_contact(feet_pos_w: torch.Tensor, sole_offset: float, cfg: LocoRewardCf
     return torch.sigmoid((cfg.contact_height - sole_z) / cfg.contact_width)
 
 
+def advance_clock(clock: torch.Tensor, dt: float, period: float) -> torch.Tensor:
+    """The gait clock [sin, cos] (…, 2) one step later (a rotation by 2 pi dt / period)."""
+    d = 2.0 * math.pi * dt / period
+    c, s = math.cos(d), math.sin(d)
+    sin, cos = clock[..., 0], clock[..., 1]
+    return torch.stack([sin * c + cos * s, cos * c - sin * s], dim=-1)
+
+
+def swing_reference(clock: torch.Tensor, height: float) -> torch.Tensor:
+    """Sole-height reference (…, 2) [left, right]: half-sine arcs, left swings while sin > 0, right while sin < 0."""
+    sin = clock[..., 0]
+    return height * torch.stack([sin.clamp(min=0.0), (-sin).clamp(min=0.0)], dim=-1)
+
+
 def _euler_rel_trunk(pelvis_quat_w: torch.Tensor, trunk_quat_w: torch.Tensor):
     """Roll / pitch of the trunk in the pelvis yaw frame and the trunk-vs-pelvis yaw difference (Isaac's
     track_body_{roll,pitch,yaw}_exp)."""
@@ -201,7 +224,7 @@ def loco_reward_terms(
     effort_limit: torch.Tensor,  # (29,)
     action: torch.Tensor,  # (…, 15) clean policy action
     prev_action: torch.Tensor,  # (…, 15)
-    cmd: torch.Tensor,  # (…, 7) [vx, vy, wz, height, roll, pitch, yaw]
+    cmd: torch.Tensor,  # (…, 7) [vx, vy, wz, height, roll, pitch, yaw], or (…, 9) with the gait clock [sin, cos]
     term_prob: torch.Tensor,  # (…,) termination flag (sim) or probability (imagination)
     soft_limits: torch.Tensor,  # (29, 2)
     default_joint_pos: torch.Tensor,  # (29,)
@@ -248,6 +271,10 @@ def loco_reward_terms(
     sole_z = b.feet_pos_w[..., 2] - sole_offset
     swing = ((sole_z - cfg.swing_floor) / (cfg.swing_height - cfg.swing_floor)).clamp(0.0, 1.0).sum(-1)
     feet_swing = (1.0 - standing) * swing
+    if cmd.shape[-1] >= 9:
+        feet_phase = (1.0 - standing) * (sole_z - swing_reference(cmd[..., 7:9], cfg.swing_height)).abs().sum(-1)
+    else:
+        feet_phase = torch.zeros_like(standing)
 
     # ---- posture
     feet_mid_xy = 0.5 * (b.feet_pos_w[..., 0, :2] + b.feet_pos_w[..., 1, :2])
@@ -277,6 +304,7 @@ def loco_reward_terms(
         "feet_contact_standing_stable": dt * cfg.w_feet_contact_standing * feet_contact_standing,
         "feet_flat_standing": dt * cfg.w_feet_flat_standing * feet_flat_standing,
         "feet_swing": dt * cfg.w_feet_swing * feet_swing,
+        "feet_phase": dt * cfg.w_feet_phase * feet_phase,
         "lin_vel_z_l2": dt * cfg.w_lin_vel_z * v_b[..., 2] ** 2,
         "ang_vel_xy_l2": dt * cfg.w_ang_vel_xy * (w_b[..., :2] ** 2).sum(-1),
         "energy": dt * cfg.w_energy * energy,
@@ -314,6 +342,7 @@ LOCO_REWARD_TERM_NAMES = (
     "feet_contact_standing_stable",
     "feet_flat_standing",
     "feet_swing",
+    "feet_phase",
     "lin_vel_z_l2",
     "ang_vel_xy_l2",
     "energy",

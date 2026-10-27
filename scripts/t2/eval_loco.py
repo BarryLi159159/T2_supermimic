@@ -64,7 +64,7 @@ def main() -> None:
             obs_noise=False,
             reset_noise=False,
             domain_randomization=False,
-            record_transitions=False,
+            record_transitions=False, gait_clock=cfg["loco"].get("gait_clock", False),
             seed=0,
         ),
         device=args.device,
