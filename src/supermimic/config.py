@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from supermimic.envs.mdp.loco_rewards import LocoRewardCfg
 from supermimic.imagination.policy_trainer import PolicyTrainerCfg
+from supermimic.policy.loco_nets import LocoCriticCfg, LocoPolicyCfg
 from supermimic.policy.nets import CriticCfg, PolicyCfg
 from supermimic.world_model.wm_trainer import WMTrainerCfg
 from supermimic.world_model.world_model import WorldModelCfg
@@ -40,6 +42,19 @@ class EnvCfg:
 
 
 @dataclass
+class LocoCfg:
+    """The velocity-command locomotion task (``--task loco``); env size / noise / DR come from ``env``."""
+
+    resampling_time_range: tuple[float, float] = (3.0, 6.0)
+    rel_standing_envs: float = 0.4
+    curriculum_start: int = 50_000  # iterations over which the torso command ranges widen (Isaac: 20k-60k PPO it)
+    curriculum_end: int = 250_000
+    reward: LocoRewardCfg = field(default_factory=LocoRewardCfg)
+    policy: LocoPolicyCfg = field(default_factory=LocoPolicyCfg)
+    critic: LocoCriticCfg = field(default_factory=LocoCriticCfg)
+
+
+@dataclass
 class ScheduleCfg:
     total_iterations: int = 320_000  # env steps (plan D12 reading A)
     updates_per_env_step: float = 0.4  # UTD
@@ -57,6 +72,7 @@ class ScheduleCfg:
 @dataclass
 class TrainConfig:
     run_name: str = "debug"
+    task: str = "tracking"  # tracking (motion imitation, the paper) | loco (velocity-command walking, Booster_T2)
     log_root: Path = Path("logs")
     seed: int = 0
     device: str = "cuda:0"
@@ -68,6 +84,7 @@ class TrainConfig:
     critic: CriticCfg = field(default_factory=CriticCfg)
     policy_trainer: PolicyTrainerCfg = field(default_factory=PolicyTrainerCfg)
     schedule: ScheduleCfg = field(default_factory=ScheduleCfg)
+    loco: LocoCfg = field(default_factory=LocoCfg)
     resume: Path | None = None  # continue a run: weights, optimizers, iteration, sampling state
     finetune: Path | None = (
         None  # start a new run from a checkpoint's weights, Adam moments and sampler state (fresh schedule); xi may be wider

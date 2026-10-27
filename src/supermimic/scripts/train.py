@@ -42,7 +42,10 @@ from supermimic.config import TrainConfig
 
 def main() -> None:
     cfg = tyro.cli(TrainConfig)
-    from supermimic.training.loop import Trainer
+    if cfg.task == "loco":
+        from supermimic.training.loco_loop import LocoTrainer as Trainer
+    else:
+        from supermimic.training.loop import Trainer
 
     Trainer(cfg).run()
 
