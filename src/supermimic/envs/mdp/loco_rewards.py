@@ -68,6 +68,12 @@ class LocoRewardCfg:
     w_knee_width: float = 0.5
     knee_ideal_width: float = 0.27 * 0.2010 / 0.2372  # G1's 0.27 m scaled by the T2 / G1 knee spacing
     knee_std: float = 0.1
+    # Not in the Isaac table: feet_air_time (contact timers) has no state-only form, and without a gait term the first
+    # world-model run (t2_loco_v1, 2026-10-27) walked at 0.28 m/s with both feet always on the ground. A moving robot is
+    # rewarded for a foot that is off the ground near the swing height; the fly penalty keeps it from lifting both.
+    w_feet_swing: float = 0.5
+    swing_height: float = 0.08
+    swing_std: float = 0.05
     w_feet_contact_standing: float = 0.5
     w_feet_flat_standing: float = 0.175
     feet_flat_dead_zone_deg: float = 3.0
@@ -117,6 +123,7 @@ class LocoRewardCfg:
             + self.w_knee_width
             + self.w_feet_contact_standing
             + self.w_feet_flat_standing
+            + self.w_feet_swing
         )
 
 
@@ -235,6 +242,9 @@ def loco_reward_terms(
     pose_gate = torch.exp(-((roll_excess / cfg.feet_flat_roll_scale) ** 2) - (pitch_excess / cfg.feet_flat_pitch_scale) ** 2)
     feet_flat_standing = standing * both_down * pose_gate * flatness
     feet_contact_standing = standing * both_down
+    sole_z = b.feet_pos_w[..., 2] - sole_offset
+    swing = ((1.0 - contact) * torch.exp(-((sole_z - cfg.swing_height) ** 2) / cfg.swing_std**2)).sum(-1)
+    feet_swing = (1.0 - standing) * swing
 
     # ---- posture
     feet_mid_xy = 0.5 * (b.feet_pos_w[..., 0, :2] + b.feet_pos_w[..., 1, :2])
@@ -263,6 +273,7 @@ def loco_reward_terms(
         "knee_stance_width": dt * cfg.w_knee_width * torch.exp(-((knee_width - cfg.knee_ideal_width) ** 2) / cfg.knee_std**2),
         "feet_contact_standing_stable": dt * cfg.w_feet_contact_standing * feet_contact_standing,
         "feet_flat_standing": dt * cfg.w_feet_flat_standing * feet_flat_standing,
+        "feet_swing": dt * cfg.w_feet_swing * feet_swing,
         "lin_vel_z_l2": dt * cfg.w_lin_vel_z * v_b[..., 2] ** 2,
         "ang_vel_xy_l2": dt * cfg.w_ang_vel_xy * (w_b[..., :2] ** 2).sum(-1),
         "energy": dt * cfg.w_energy * energy,
@@ -299,6 +310,7 @@ LOCO_REWARD_TERM_NAMES = (
     "knee_stance_width",
     "feet_contact_standing_stable",
     "feet_flat_standing",
+    "feet_swing",
     "lin_vel_z_l2",
     "ang_vel_xy_l2",
     "energy",
