@@ -10,7 +10,12 @@ from supermimic.data.replay_buffer import StartBatch
 from supermimic.envs.mdp.motion_library import MotionLibrary
 from supermimic.imagination.compiled import REWARD_TERM_NAMES, ImagStep
 from supermimic.policy.nets import Policy
-from supermimic.world_model.heads import ReferenceFrame, analytic_observation, anchor_relative_obs, flatten_history_term_major
+from supermimic.world_model.heads import (
+    ReferenceFrame,
+    analytic_observation,
+    anchor_relative_obs,
+    flatten_history_term_major,
+)
 from supermimic.world_model.wm_trainer import reference_at
 from supermimic.world_model.world_model import WorldModel
 
@@ -42,6 +47,7 @@ def imagine(
     obs_noise: bool = True,
     step_fn: ImagStep | None = None,
     anchor_obs: bool = False,
+    anchor_ori_only: bool = False,
 ) -> ImagRollout:
     device = start.state.device
     n = start.state.shape[0]
@@ -63,6 +69,8 @@ def imagine(
         rel = anchor_relative_obs(anchor_pose[..., 0:3], anchor_pose[..., 3:7], ref_t.body_pos_w[..., ai, :], ref_t.body_quat_w[..., ai, :])
         if obs_noise:
             rel = rel + (torch.rand_like(rel) * 2 - 1) * anchor_noise_half
+        if anchor_ori_only:
+            rel = rel[..., 3:]
         return torch.cat([g, rel], dim=-1)
 
     # Initial observation history from the logged states/actions (noise re-sampled per frame).

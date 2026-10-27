@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import torch
 
-from supermimic.world_model.heads import ReferenceFrame, analytic_observation
+from supermimic.world_model.heads import (
+    ReferenceFrame,
+    analytic_observation,
+    soft_termination_logits,
+)
 from supermimic.world_model.world_model import WorldModel
 
 REWARD_TERM_NAMES = (
@@ -26,9 +30,11 @@ REWARD_TERM_NAMES = (
 
 
 class ImagStep:
-    def __init__(self, wm: WorldModel, default_joint_pos: torch.Tensor, compile_mode: str | None = None):
+    def __init__(self, wm: WorldModel, default_joint_pos: torch.Tensor, compile_mode: str | None = None, soft_termination: bool = False, soft_term_temps: tuple[float, float] = (0.02, 0.04)):
         self.wm = wm
         self.q0 = default_joint_pos
+        self.soft_termination = soft_termination
+        self.soft_term_temps = soft_term_temps
         self._fn = self._step
         if compile_mode:
             mode = None if compile_mode == "default" else compile_mode
@@ -41,7 +47,11 @@ class ImagStep:
         terms = self.wm.heads.reward(s_next, a, a_prev, ref, bodies)
         r = terms["total"]
         term_vec = torch.stack([terms[k] for k in REWARD_TERM_NAMES], dim=0)  # (8, n)
-        logits = self.wm.termination_logits(s_next, ref)
+        if self.soft_termination:
+            feats = self.wm.heads.termination_features(s_next[..., 0:3], s_next[..., 3:7], ref)
+            logits = soft_termination_logits(feats, self.wm.cfg.height_threshold, self.wm.cfg.tilt_threshold, self.soft_term_temps)
+        else:
+            logits = self.wm.termination_logits(s_next, ref)
         obs_clean = analytic_observation(s_next, a, xi, self.q0)
         ai = self.wm.heads.anchor_index
         anchor_pose = torch.cat([bodies["pos"][..., ai, :], bodies["quat"][..., ai, :]], dim=-1)  # (n, 7)

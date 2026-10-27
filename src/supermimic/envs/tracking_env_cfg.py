@@ -85,6 +85,7 @@ class SuperMimicEnvCfgArgs:
     anchor_obs: bool = (
         False  # add BeyondMimic anchor-relative pose (9) to the goal group (plan D5 alt.)
     )
+    anchor_ori_only: bool = False  # with anchor_obs: the reference root orientation only (6), no position (supermimic_vibed)
     debug_vis: bool = False  # draw the reference ghost in the viewer (scripts/play.py)
     extra_command_kwargs: dict = field(default_factory=dict)
 
@@ -119,10 +120,16 @@ def make_env_cfg(a: SuperMimicEnvCfgArgs) -> ManagerBasedRlEnvCfg:
                 ),
                 **(
                     {
-                        "anchor_pos": ObservationTermCfg(
-                            func=track_mdp.motion_anchor_pos_b,
-                            params={"command_name": "motion"},
-                            noise=noise(-0.25, 0.25),
+                        **(
+                            {}
+                            if a.anchor_ori_only
+                            else {
+                                "anchor_pos": ObservationTermCfg(
+                                    func=track_mdp.motion_anchor_pos_b,
+                                    params={"command_name": "motion"},
+                                    noise=noise(-0.25, 0.25),
+                                )
+                            }
                         ),
                         "anchor_ori": ObservationTermCfg(
                             func=track_mdp.motion_anchor_ori_b,

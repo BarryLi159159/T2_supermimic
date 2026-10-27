@@ -34,7 +34,10 @@ class PolicyTrainerCfg:
     use_critic: bool = True
     obs_noise: bool = True
     compile: str | None = "default"
-    anchor_obs: bool = False  # None | "default" | "reduce-overhead" | "max-autotune-no-cudagraphs"
+    anchor_obs: bool = False
+    anchor_ori_only: bool = False
+    soft_termination: bool = False  # imagination terminates on the sigmoid-softened hard thresholds, not the learned head
+    soft_term_temps: tuple[float, float] = (0.02, 0.04)  # m, tilt
 
 
 class PolicyTrainer:
@@ -44,7 +47,7 @@ class PolicyTrainer:
         self.critic_opt = torch.optim.Adam(critic.parameters(), lr=cfg.critic_lr)
         from supermimic.imagination.compiled import ImagStep
 
-        self.step_fn = ImagStep(wm, lib.default_joint_pos, compile_mode=cfg.compile)
+        self.step_fn = ImagStep(wm, lib.default_joint_pos, compile_mode=cfg.compile, soft_termination=cfg.soft_termination, soft_term_temps=cfg.soft_term_temps)
 
     def set_lr(self, lr: float) -> None:
         for g in self.opt.param_groups:
@@ -68,7 +71,7 @@ class PolicyTrainer:
         self.wm.requires_grad_(False)
         self.critic.requires_grad_(False)
         with torch.set_grad_enabled(train_actor):
-            ro = imagine(self.wm, self.policy, self.lib, start, cfg.horizon, cfg.future_frames, obs_noise=cfg.obs_noise, step_fn=self.step_fn, anchor_obs=cfg.anchor_obs)
+            ro = imagine(self.wm, self.policy, self.lib, start, cfg.horizon, cfg.future_frames, obs_noise=cfg.obs_noise, step_fn=self.step_fn, anchor_obs=cfg.anchor_obs, anchor_ori_only=cfg.anchor_ori_only)
             feat, goals, e_root = self._critic_inputs(ro)
             if cfg.use_critic:
                 v_H = self.critic(feat[-1], goals[-1], xi_norm, e_root[-1])

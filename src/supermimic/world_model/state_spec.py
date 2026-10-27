@@ -68,7 +68,7 @@ class StateSpec:
         self.dt = cfg.dt
         rep = lambda scales, sizes: torch.cat(
             [torch.full((n,), float(s)) for s, n in zip(scales, sizes)]
-        )  # noqa: E731
+        )
         self.err_scale = rep(cfg.err_scale, (3, 3, 3, 3, NJ, NJ)).to(device=device, dtype=dtype)
         self.out_scale = rep(cfg.out_scale, (3, 3, NJ, 3, 3, NJ)).to(device=device, dtype=dtype)
         self.in_scale = rep(cfg.in_scale, (1, 6, 3, 3, NJ, NJ)).to(device=device, dtype=dtype)

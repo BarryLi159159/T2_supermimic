@@ -30,7 +30,7 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
-from scipy.spatial.transform import Rotation, Slerp
+from scipy.spatial.transform import Rotation
 
 G1_JOINT_NAMES: tuple[str, ...] = (
     "left_hip_pitch_joint",

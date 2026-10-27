@@ -142,7 +142,7 @@ class MotionLibrary:
             self._ref = torch.as_tensor(ref_np, device=self.device, dtype=store_dtype if compact else dtype)
             del ref_np, ref_chunks
         if not compact:
-            t = lambda arrs: torch.as_tensor(np.concatenate(arrs, 0), dtype=dtype, device=self.device)  # noqa: E731
+            t = lambda arrs: torch.as_tensor(np.concatenate(arrs, 0), dtype=dtype, device=self.device)
             self.body_pos_w = t(body_chunks["pos"])
             self.body_quat_w = t(body_chunks["quat"])
             self.body_lin_vel_w = t(body_chunks["lin"])

@@ -54,6 +54,20 @@ def anchor_relative_obs(robot_anchor_pos: torch.Tensor, robot_anchor_quat: torch
 ANCHOR_OBS_DIM = 9
 
 
+def anchor_obs_dim(anchor_obs: bool, ori_only: bool = False) -> int:
+    """Extra goal dims of the anchor-relative observation: pose (9), orientation only (6) or none."""
+    return (6 if ori_only else 9) if anchor_obs else 0
+
+
+def soft_termination_logits(features: torch.Tensor, height_thr: float, tilt_thr: float, temps: tuple[float, float] = (0.02, 0.04)) -> torch.Tensor:
+    """Differentiable termination probability of the paper's hard thresholds (supermimic_vibed): the two sigmoid-
+    softened tests combined as independent survival events, returned as logits of the termination probability."""
+    tz, tt = temps
+    alive = (1.0 - torch.sigmoid((features[..., 0].abs() - height_thr) / tz)) * (1.0 - torch.sigmoid((features[..., 1].abs() - tilt_thr) / tt))
+    d = (1.0 - alive).clamp(1.0e-6, 1.0 - 1.0e-6)
+    return torch.log(d) - torch.log1p(-d)
+
+
 def flatten_history_term_major(hist: torch.Tensor) -> torch.Tensor:
     """(H, N, 93) oldest→newest  ->  (N, 930) in mjlab's term-major layout [A_t0..A_tH-1, B_t0..]."""
     H, N, _ = hist.shape
@@ -146,7 +160,12 @@ class AnalyticHeads:
     def root_error_features(s: torch.Tensor, ref: ReferenceFrame) -> torch.Tensor:
         """Critic-only privileged drift features (plan D10): root position error in the reference
         heading frame (3) and yaw error (1). (N, 4)"""
-        from supermimic.kinematics.rotations import heading_yaw, quat_apply_inverse, wrap_to_pi, yaw_quat
+        from supermimic.kinematics.rotations import (
+            heading_yaw,
+            quat_apply_inverse,
+            wrap_to_pi,
+            yaw_quat,
+        )
 
         dp = quat_apply_inverse(yaw_quat(ref.root_quat_w), s[..., 0:3] - ref.root_pos_w)
         dyaw = wrap_to_pi(heading_yaw(s[..., 3:7]) - heading_yaw(ref.root_quat_w))

@@ -79,6 +79,7 @@ def main(ckpt: Path, out: Path | None = None, atol: float = 1e-5) -> None:
         "history": cfg["policy"]["history"],
         "future_frames": cfg["env"]["future_frames"],
         "anchor_obs": cfg["env"].get("anchor_obs", False),
+        "anchor_ori_only": cfg["env"].get("anchor_ori_only", False),
         "obs_term_scale": cfg["policy"]["obs_term_scale"],
         "goal_term_scale": cfg["policy"]["goal_term_scale"],
     }

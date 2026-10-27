@@ -30,7 +30,12 @@ import mujoco
 import numpy as np
 import torch
 
-from supermimic.kinematics.rotations import quat_apply, quat_from_angle_axis, quat_mul, quat_normalize
+from supermimic.kinematics.rotations import (
+    quat_apply,
+    quat_from_angle_axis,
+    quat_mul,
+    quat_normalize,
+)
 
 
 @dataclass
@@ -76,7 +81,7 @@ class G1Kinematics:
         assert links[0].joint_type == mujoco.mjtJoint.mjJNT_FREE and links[0].parent_index == -1
         self.links = links
 
-        t = lambda a: torch.as_tensor(np.asarray(a), dtype=dtype, device=self.device)  # noqa: E731
+        t = lambda a: torch.as_tensor(np.asarray(a), dtype=dtype, device=self.device)
         self.body_pos = t(model.body_pos[1:])  # (nb,3)
         self.body_quat = t(model.body_quat[1:])  # (nb,4) wxyz
         jnt_pos = np.zeros((self.nbody, 3))

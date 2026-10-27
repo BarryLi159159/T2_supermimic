@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
 from supermimic.world_model.dynamics import MLP, DynamicsMLP
 from supermimic.world_model.heads import AnalyticHeads, ReferenceFrame

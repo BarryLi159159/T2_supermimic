@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from supermimic.envs.sim_context import XI_DIM
 from supermimic.world_model.dynamics import MLP

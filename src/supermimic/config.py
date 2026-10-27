@@ -39,6 +39,7 @@ class EnvCfg:
     future_frames: int = 10
     compact_library: bool = False
     anchor_obs: bool = False
+    anchor_ori_only: bool = False  # with anchor_obs: reference root orientation only (6-d, IMU-observable), no position
 
 
 @dataclass
@@ -66,6 +67,7 @@ class ScheduleCfg:
     lr_final_ratio: float = 0.03
     lr_decay_fraction: float = 250_000 / 320_000
     lr_warmup_iterations: int = 0  # linear ramp of the learning rate from 0; for fine-tuning a converged checkpoint
+    wm_only_iterations: int = 0  # neither actor nor critic is updated before this iteration (world-model warm-up)
     policy_freeze_iterations: int = 0  # actor not updated before this iteration (world model / critic adapt first when fine-tuning on changed dynamics)
     log_interval: int = 50  # iterations
     checkpoint_interval: int = 4000  # iterations

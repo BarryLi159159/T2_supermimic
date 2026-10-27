@@ -60,7 +60,7 @@ def main(
         sampling_mode=sampling,
         record_transitions=False,
         seed=0,
-        anchor_obs=cfg["env"].get("anchor_obs", False),
+        anchor_obs=cfg["env"].get("anchor_obs", False), anchor_ori_only=cfg["env"].get("anchor_ori_only", False),
         robot=cfg["env"].get("robot", "g1"),
         debug_vis=ghost,
     )

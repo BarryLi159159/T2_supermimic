@@ -24,7 +24,7 @@ from supermimic.training.distributed import (
     init_distributed,
 )
 from supermimic.training.schedule import cosine_lr
-from supermimic.world_model.heads import AnalyticHeads
+from supermimic.world_model.heads import AnalyticHeads, anchor_obs_dim
 from supermimic.world_model.wm_trainer import WorldModelTrainer
 from supermimic.world_model.world_model import WorldModel
 
@@ -32,8 +32,9 @@ from supermimic.world_model.world_model import WorldModel
 class Trainer:
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
-        cfg.policy.goal_dim = cfg.env.future_frames * 68 + (9 if cfg.env.anchor_obs else 0)
+        cfg.policy.goal_dim = cfg.env.future_frames * 68 + anchor_obs_dim(cfg.env.anchor_obs, cfg.env.anchor_ori_only)
         cfg.policy_trainer.anchor_obs = cfg.env.anchor_obs
+        cfg.policy_trainer.anchor_ori_only = cfg.env.anchor_ori_only
         self.rank, local_rank, self.world = init_distributed()
         self.is_main = self.rank == 0
         if self.world > 1:
@@ -98,6 +99,7 @@ class Trainer:
                 replay_capacity=cfg.env.replay_capacity,
                 compact_library=cfg.env.compact_library,
                 anchor_obs=cfg.env.anchor_obs,
+                anchor_ori_only=cfg.env.anchor_ori_only,
                 seed=cfg.seed + 1000 * self.rank,
             ),
             device=self.device,
@@ -294,7 +296,8 @@ class Trainer:
                     torch.cuda.synchronize()
                     timers["wm"] += time.perf_counter() - t0
                     t0 = time.perf_counter()
-                    for _ in range(sch.policy_updates_per_wm_update):
+                    m_pi = {}
+                    for _ in range(sch.policy_updates_per_wm_update if self.iteration >= sch.wm_only_iterations else 0):
                         m_pi = self.policy_trainer.update(
                             self.buffer, train_actor=self.iteration >= sch.policy_freeze_iterations
                         )

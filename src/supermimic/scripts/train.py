@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 
+
 # Under torchrun, pin each rank to its own GPU *before* CUDA/warp initialise: MuJoCo Warp and
 # mjlab's simulation always run on the first visible device, so cfg.device alone is not enough.
 # Skipped on a box with fewer GPUs than ranks (single-GPU smoke tests share cuda:0 via gloo).
