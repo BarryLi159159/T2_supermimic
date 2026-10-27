@@ -17,6 +17,7 @@ real T2 (natural frequency 10 Hz), wrists 18.21 / 1.449 for the hand's own weigh
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -25,7 +26,7 @@ from mjlab.actuator import DcMotorActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.utils.spec_config import CollisionCfg
 
-from supermimic.robots import RobotSpec
+from supermimic.robots import PDGains, RobotSpec
 
 T2_XML = Path(__file__).resolve().parents[3] / "assets" / "t2" / "t2_29dof_trunk.xml"
 T2_SHARPA_XML = T2_XML.with_name(
@@ -187,6 +188,31 @@ T2_JOINT_NAMES: tuple[str, ...] = (
     *(f"right_{j}_joint" for j in _LEG),
 )
 
+# The locomotion policy's joints in Booster_T2's deployment order (config/t2_robot_config.py JOINT_ORDER: legs, then
+# waist yaw / roll / pitch); the arms are held by the environment, the head is welded.
+T2_POLICY_JOINTS: tuple[str, ...] = (
+    *(f"left_{j}_joint" for j in _LEG),
+    *(f"right_{j}_joint" for j in _LEG),
+    "waist_yaw_joint",
+    "waist_roll_joint",
+    "waist_pitch_joint",
+)
+
+
+def t2_pd_gains(actuators: tuple[DcMotorActuatorCfg, ...] = T2_ACTUATORS) -> PDGains:
+    """kp / kd / effort per joint in model order, resolved from the actuator groups' name expressions."""
+    kp, kd, effort = [], [], []
+    for name in T2_JOINT_NAMES:
+        act = next(a for a in actuators if any(re.fullmatch(e, name) for e in a.target_names_expr))
+        kp.append(float(act.stiffness))
+        kd.append(float(act.damping))
+        effort.append(float(act.effort_limit))
+    return PDGains(tuple(kp), tuple(kd), tuple(effort))
+
+
+# Sole plane below the ankle_roll link origin: the ankle collision box sits at z = 0.00511 with half height 0.037616.
+T2_SOLE_OFFSET = 0.037616 - 0.00511
+
 T2 = RobotSpec(
     name="t2",
     xml_path=T2_XML,
@@ -215,6 +241,14 @@ T2 = RobotSpec(
     ),
     foot_geom_regex=FOOT_GEOM_REGEX,
     com_body="trunk",
+    # Locomotion task: Booster_T2's convention (G1 pelvis -> waist_yaw_link, height at waist_pitch_link).
+    pelvis_body="waist_yaw_link",
+    height_body="waist_pitch_link",
+    foot_bodies=("left_ankle_roll_link", "right_ankle_roll_link"),
+    knee_bodies=("left_knee_pitch_link", "right_knee_pitch_link"),
+    sole_offset=T2_SOLE_OFFSET,
+    policy_joints=T2_POLICY_JOINTS,
+    pd_gains=t2_pd_gains,
 )
 
 # Diagnostic variant: the same robot without the command delay (everything else equal), to price the delay model.

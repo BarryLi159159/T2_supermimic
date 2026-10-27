@@ -2,6 +2,10 @@
 
 The task code (env cfg, trainer, motion library, evaluation) never names a body or a joint itself; it asks the
 ``RobotSpec`` selected by ``--env.robot`` (``g1`` = the paper's Unitree G1, ``t2`` = Booster T2).
+
+The locomotion task (velocity-command walking, ``envs/loco_env_cfg.py``) needs a few more names: the pelvis and the
+height body of the Decoupled-WBC command convention, the feet and knees, the policy's joint subset and the PD table
+of the actuators. They are optional (``None`` on robots that only track motions).
 """
 
 from __future__ import annotations
@@ -12,6 +16,15 @@ from pathlib import Path
 
 import mujoco
 from mjlab.entity import EntityCfg
+
+
+@dataclass(frozen=True)
+class PDGains:
+    """Per-joint PD gains and effort limits in model joint order (the analytic torque of the locomotion rewards)."""
+
+    kp: tuple[float, ...]
+    kd: tuple[float, ...]
+    effort: tuple[float, ...]
 
 
 @dataclass(frozen=True)
@@ -26,6 +39,14 @@ class RobotSpec:
     tracked_bodies: tuple[str, ...]  # bodies in the reward and the reference library
     foot_geom_regex: str  # friction domain randomisation and xi
     com_body: str  # COM offset domain randomisation and xi
+    # ---- locomotion task (optional)
+    pelvis_body: str | None = None  # velocity command frame and flat-orientation body (G1 pelvis convention)
+    height_body: str | None = None  # the body whose z the height command refers to
+    foot_bodies: tuple[str, str] | None = None  # (left, right) foot links
+    knee_bodies: tuple[str, str] | None = None  # (left, right) knee links
+    sole_offset: float = 0.0  # sole plane below the foot link origin [m]
+    policy_joints: tuple[str, ...] | None = None  # the joints the locomotion policy commands (legs + waist)
+    pd_gains: Callable[[], PDGains] | None = None  # kp / kd / effort per joint in model order
 
     def load_model(self) -> mujoco.MjModel:
         """CPU MjModel of ``xml_path``; asserts the free joint comes first and the hinge order is ``joint_names``."""
@@ -35,6 +56,11 @@ class RobotSpec:
         assert tuple(names[1:]) == self.joint_names, f"joint order mismatch: {names[1:]}"
         assert model.nq == 7 + len(self.joint_names) and model.nv == 6 + len(self.joint_names)
         return model
+
+    def policy_joint_ids(self) -> list[int]:
+        """Indices of ``policy_joints`` in model joint order."""
+        assert self.policy_joints is not None, f"{self.name} has no locomotion joint subset"
+        return [self.joint_names.index(j) for j in self.policy_joints]
 
 
 def get_robot(name: str) -> RobotSpec:
