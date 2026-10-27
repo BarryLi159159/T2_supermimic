@@ -19,7 +19,7 @@ import math
 from dataclasses import dataclass
 
 import torch
-from mjlab.utils.lab_api.math import euler_xyz_from_quat, wrap_to_pi
+from mjlab.utils.lab_api.math import wrap_to_pi
 
 from supermimic.kinematics.rotations import (
     projected_gravity,
@@ -28,6 +28,22 @@ from supermimic.kinematics.rotations import (
     quat_mul,
     yaw_quat,
 )
+
+_EPS = 1.0e-12
+
+
+def _norm(v: torch.Tensor) -> torch.Tensor:
+    """Euclidean norm over the last dim with a finite gradient at zero (BPTT passes through every term)."""
+    return torch.sqrt((v * v).sum(-1) + _EPS)
+
+
+def _roll_pitch_from_quat(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Roll and pitch of mjlab's euler_xyz_from_quat (XYZ extrinsic), with the asin argument kept inside (-1, 1) so the
+    gradient stays finite when the trunk reaches +-90 deg pitch (a fallen robot in imagination)."""
+    w, x, y, z = q.unbind(-1)
+    roll = torch.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
+    pitch = torch.asin(torch.clamp(2.0 * (w * y - z * x), -1.0 + 1.0e-6, 1.0 - 1.0e-6))
+    return roll, pitch
 
 
 @dataclass
@@ -158,10 +174,8 @@ def _euler_rel_trunk(pelvis_quat_w: torch.Tensor, trunk_quat_w: torch.Tensor):
     track_body_{roll,pitch,yaw}_exp)."""
     pelvis_yaw = yaw_quat(pelvis_quat_w)
     q_rel = quat_mul(quat_conjugate(pelvis_yaw), trunk_quat_w)
-    shape = q_rel.shape[:-1]
-    roll, pitch, _ = euler_xyz_from_quat(q_rel.reshape(-1, 4))
-    roll = wrap_to_pi(roll).reshape(shape)
-    pitch = wrap_to_pi(pitch).reshape(shape)
+    roll, pitch = _roll_pitch_from_quat(q_rel)
+    roll = wrap_to_pi(roll)
     q_yaw = quat_mul(quat_conjugate(pelvis_yaw), yaw_quat(trunk_quat_w))
     yaw = 2.0 * torch.atan2(q_yaw[..., 3], q_yaw[..., 0])
     return roll, pitch, yaw
@@ -192,7 +206,7 @@ def loco_reward_terms(
     v_yaw = quat_apply_inverse(pelvis_yaw, b.pelvis_lin_vel_w)
     v_b = quat_apply_inverse(b.pelvis_quat_w, b.pelvis_lin_vel_w)
     w_b = quat_apply_inverse(b.pelvis_quat_w, b.pelvis_ang_vel_w)
-    cmd_speed = torch.linalg.vector_norm(cmd[..., :2], dim=-1) + cmd[..., 2].abs()
+    cmd_speed = _norm(cmd[..., :2]) + cmd[..., 2].abs()
     standing = (cmd_speed <= cfg.standing_cmd_threshold).to(joint_pos.dtype)
 
     # ---- tracking
@@ -208,12 +222,12 @@ def loco_reward_terms(
     contact = soft_contact(b.feet_pos_w, sole_offset, cfg)  # (…, 2)
     both_down = contact[..., 0] * contact[..., 1]
     fly = (1.0 - contact[..., 0]) * (1.0 - contact[..., 1])
-    feet_speed_xy = torch.linalg.vector_norm(b.feet_lin_vel_w[..., :2], dim=-1)
+    feet_speed_xy = _norm(b.feet_lin_vel_w[..., :2])
     feet_slide = (feet_speed_xy * contact).sum(-1)
-    feet_dist = torch.linalg.vector_norm(b.feet_pos_w[..., 0, :] - b.feet_pos_w[..., 1, :], dim=-1)
+    feet_dist = _norm(b.feet_pos_w[..., 0, :] - b.feet_pos_w[..., 1, :])
     feet_too_near = (cfg.feet_too_near_threshold - feet_dist).clamp(min=0.0)
     g_feet = projected_gravity(b.feet_quat_w)  # (…, 2, 3)
-    foot_tilt = torch.atan2(torch.linalg.vector_norm(g_feet[..., :2], dim=-1), -g_feet[..., 2])
+    foot_tilt = torch.atan2(_norm(g_feet[..., :2]), -g_feet[..., 2])
     tilt_excess = (foot_tilt - math.radians(cfg.feet_flat_dead_zone_deg)).clamp(min=0.0)
     flatness = torch.exp(-((tilt_excess / math.radians(cfg.feet_flat_std_deg)) ** 2)).mean(-1)
     roll_excess = (cmd[..., 4].abs() - cfg.feet_flat_roll_dead_zone).clamp(min=0.0)
@@ -225,13 +239,13 @@ def loco_reward_terms(
     # ---- posture
     feet_mid_xy = 0.5 * (b.feet_pos_w[..., 0, :2] + b.feet_pos_w[..., 1, :2])
     cog_dist_sq = ((b.com_xy_w - feet_mid_xy) ** 2).sum(-1)
-    knee_width = torch.linalg.vector_norm(b.knee_pos_w[..., 0, :2] - b.knee_pos_w[..., 1, :2], dim=-1)
+    knee_width = _norm(b.knee_pos_w[..., 0, :2] - b.knee_pos_w[..., 1, :2])
 
     # ---- joints and actuators
     lo, hi = soft_limits[..., 0], soft_limits[..., 1]
     out_of_limits = ((lo - joint_pos).clamp(min=0.0) + (joint_pos - hi).clamp(min=0.0)).sum(-1)
     dev = (joint_pos - default_joint_pos).abs()
-    energy = torch.linalg.vector_norm(torque * joint_vel, dim=-1)
+    energy = _norm(torque * joint_vel)
     acc = (joint_vel[..., idx.policy] - prev_joint_vel[..., idx.policy]) / dt
     torque_ratio = torque.abs() / effort_limit
 

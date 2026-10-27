@@ -19,6 +19,7 @@ class LocoPolicyTrainer:
         self.opt = torch.optim.Adam(policy.parameters(), lr=cfg.lr, betas=cfg.betas)
         self.critic_opt = torch.optim.Adam(critic.parameters(), lr=cfg.critic_lr)
         self.step_fn = LocoImagStep(wm, compile_mode=cfg.compile)
+        self.skipped = 0
 
     def set_lr(self, lr: float) -> None:
         for g in self.opt.param_groups:
@@ -49,8 +50,11 @@ class LocoPolicyTrainer:
             loss.backward()
             allreduce_grads(self.policy)
             gn = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), cfg.grad_clip_norm)
-            torch.nn.utils.clip_grad_value_(self.policy.parameters(), cfg.grad_clip_value)
-            self.opt.step()
+            if torch.isfinite(gn):
+                torch.nn.utils.clip_grad_value_(self.policy.parameters(), cfg.grad_clip_value)
+                self.opt.step()
+            else:
+                self.skipped += 1  # a non-finite gradient (one bad rollout) must not poison the weights
         else:
             gn = torch.zeros(())
         self.wm.requires_grad_(True)
@@ -63,6 +67,7 @@ class LocoPolicyTrainer:
             "imag_survival_H": float(ro.survival[-1].mean().detach()),
             "imag_dhat_mean": float(ro.dhat[1:].mean().detach()),
             "policy_grad_norm": float(gn),
+            "skipped_updates": float(self.skipped),
             "action_abs_mean": float(ro.actions.abs().mean().detach()),
         }
         for k, v in ro.reward_terms.items():

@@ -36,6 +36,7 @@ class WorldModelTrainer:
         self.lib = lib
         self.cfg = cfg
         self.opt = torch.optim.Adam(wm.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+        self.skipped = 0
         wm.enable_compile(cfg.compile)
 
     def set_lr(self, lr: float) -> None:
@@ -58,9 +59,13 @@ class WorldModelTrainer:
             loss.backward()
             allreduce_grads(self.wm)
             gn = torch.nn.utils.clip_grad_norm_(self.wm.parameters(), self.cfg.grad_clip)
-            self.opt.step()
+            if torch.isfinite(gn):
+                self.opt.step()
+            else:
+                self.skipped += 1  # a non-finite gradient (one bad window) must not poison the weights
             m["loss"] = loss.detach()
             m["grad_norm"] = gn.detach()
+            m["skipped_updates"] = torch.tensor(float(self.skipped))
             for k, v in m.items():
                 agg[k] = agg.get(k, 0.0) + v
         # Single host sync per update (keeps the CPU queuing GPU work across minibatches).
