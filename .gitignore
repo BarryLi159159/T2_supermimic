@@ -13,3 +13,5 @@ wandb/
 .pytest_cache/
 .ruff_cache/
 experiments/**/outputs/
+/models/
+MUJOCO_LOG.TXT
