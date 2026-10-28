@@ -19,7 +19,7 @@ class LocoTrainer(Trainer):
     def __init__(self, cfg):
         goal_dim = 9 if cfg.loco.gait_clock else 7
         cfg.loco.policy.goal_dim = goal_dim  # saved with the config / checkpoint, so evaluation rebuilds the same input
-        cfg.loco.critic.goal_dim = goal_dim
+        cfg.loco.critic.goal_dim = goal_dim + (2 if cfg.loco.reward.w_feet_air_time != 0 else 0)  # the air timers
         super().__init__(cfg)
 
     def _build(self) -> None:
@@ -46,6 +46,7 @@ class LocoTrainer(Trainer):
                 rsi_prob=cfg.loco.rsi_prob,
                 gait_clock=cfg.loco.gait_clock,
                 gait_period=cfg.loco.reward.gait_period,
+                air_time=cfg.loco.reward.w_feet_air_time != 0,
             ),
             device=self.device,
             reward_cfg=cfg.loco.reward,

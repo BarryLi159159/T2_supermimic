@@ -30,7 +30,7 @@ class LocoPolicyCfg:
 @dataclass
 class LocoCriticCfg:
     hidden: tuple[int, ...] = (256, 128)
-    goal_dim: int = CMD_DIM
+    goal_dim: int = CMD_DIM  # the policy's goal, + 2 air timers when the reward has feet_air_time
 
 
 def loco_obs_scale_vector(cfg: LocoPolicyCfg) -> torch.Tensor:

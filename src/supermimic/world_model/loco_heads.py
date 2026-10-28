@@ -111,8 +111,19 @@ class LocoHeads:
 
     # ------------------------------------------------------------------ heads
 
-    def reward(self, s_prev: torch.Tensor, s_next: torch.Tensor, action29: torch.Tensor, prev_action29: torch.Tensor, cmd: torch.Tensor, term_prob: torch.Tensor, bodies: LocoBodies | None = None) -> dict[str, torch.Tensor]:
-        """Reward r_{t+1} of reaching s_next from s_prev under action29 (the clean 29-d action, arms included)."""
+    def reward(
+        self,
+        s_prev: torch.Tensor,
+        s_next: torch.Tensor,
+        action29: torch.Tensor,
+        prev_action29: torch.Tensor,
+        cmd: torch.Tensor,
+        term_prob: torch.Tensor,
+        bodies: LocoBodies | None = None,
+        air_time: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Reward r_{t+1} of reaching s_next from s_prev under action29 (the clean 29-d action, arms included);
+        ``air_time`` is the feet air timers at s_next (None leaves feet_air_time at 0)."""
         b = bodies if bodies is not None else self.bodies(s_next)
         _, _, q, _, _, qd = split_state(s_next)
         qd_prev = split_state(s_prev)[5]
@@ -127,6 +138,7 @@ class LocoHeads:
             prev_action=prev_action29[..., self.policy_ids],
             cmd=cmd,
             term_prob=term_prob,
+            air_time=air_time,
             soft_limits=self.soft_limits,
             default_joint_pos=self.default_joint_pos,
             sole_offset=self.spec.sole_offset,

@@ -17,6 +17,7 @@ import torch
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 
+from supermimic.envs.mdp.loco_rewards import advance_air_time, timer_contact
 from supermimic.envs.state_io import StateIO
 
 if TYPE_CHECKING:
@@ -41,10 +42,11 @@ class loco_reward:
         self.command_name = cfg.params.get("command_name", "velocity")
         self.action_name = cfg.params.get("action_name", "joint_pos")
         self.last_terms: dict[str, torch.Tensor] = {}
+        self.air_time = torch.zeros(env.num_envs, 2, device=env.device)  # feet air timers of the current state (the replay recorder stores them)
 
     def reset(self, env_ids=None) -> None:
         # The reset state is written after this reward's reset; prev_state is refreshed on the next call.
-        pass
+        self.air_time[slice(None) if env_ids is None else env_ids] = 0.0
 
     def __call__(self, env: ManagerBasedRlEnv, command_name: str = "velocity", action_name: str = "joint_pos", gait_clock: bool = False) -> torch.Tensor:
         heads = heads_of(env)
@@ -58,7 +60,10 @@ class loco_reward:
         fresh = env.episode_length_buf <= 1
         s_prev = torch.where(fresh.unsqueeze(-1), s, self.prev_state)
         terminated = env.termination_manager.terminated.to(s.dtype)
-        terms = heads.reward(s_prev, s, term.clean_raw, term.prev_clean_raw, cmd, terminated)
+        b = heads.bodies(s)
+        rcfg = heads.reward_cfg
+        self.air_time[:] = advance_air_time(self.air_time, timer_contact(b.feet_pos_w, heads.spec.sole_offset, rcfg), rcfg.dt)
+        terms = heads.reward(s_prev, s, term.clean_raw, term.prev_clean_raw, cmd, terminated, bodies=b, air_time=self.air_time)
         self.prev_state = s
         self.last_terms = terms
         return terms["total"] / env.step_dt  # the manager multiplies by dt

@@ -1,4 +1,7 @@
-"""ReplayRecorder of the locomotion task: rows carry the 7-d command instead of a reference frame."""
+"""ReplayRecorder of the locomotion task: rows carry the goal instead of a reference frame.
+
+The goal is the 7-d command, then the gait clock (2) when the policy sees it, then the feet air timers (2) of the
+row's state when the reward has ``feet_air_time`` (the imagined rollout starts its timers from them)."""
 
 from __future__ import annotations
 
@@ -19,7 +22,8 @@ class LocoReplayRecorder(ReplayRecorder):
         super().__init__(cfg, env)
         n = env.num_envs
         self.gait_clock = bool(cfg.params.get("gait_clock", False))
-        goal_dim = CMD_DIM + (CLOCK_DIM if self.gait_clock else 0)
+        self.air_time = bool(cfg.params.get("air_time", False))
+        goal_dim = CMD_DIM + (CLOCK_DIM if self.gait_clock else 0) + (2 if self.air_time else 0)
         self.buffer = ReplayBuffer(n, int(cfg.params["capacity"]), STATE_DIM, 29, XI_DIM, env.device, goal_dim=goal_dim)
         self.prev_cmd = torch.zeros(n, goal_dim, device=env.device)
 
@@ -27,7 +31,12 @@ class LocoReplayRecorder(ReplayRecorder):
         self.prev_s[ids] = self.state_io.read()[ids]
         self.prev_xi[ids] = self.ctx.read()[ids]
         cmd = self.command
-        self.prev_cmd[ids] = torch.cat([cmd.command[ids], cmd.clock[ids]], dim=-1) if self.gait_clock else cmd.command[ids]
+        parts = [cmd.command[ids]]
+        if self.gait_clock:
+            parts.append(cmd.clock[ids])
+        if self.air_time:
+            parts.append(self._env.reward_manager.get_term_cfg("loco").func.air_time[ids])
+        self.prev_cmd[ids] = torch.cat(parts, dim=-1)
 
     def _write_rows(self, ids: torch.Tensor, done_next: torch.Tensor) -> None:
         env = self._env

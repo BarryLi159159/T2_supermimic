@@ -5,15 +5,19 @@ shared by the simulator side (``envs/mdp/loco_sim.py``) and the imagination side
 so the policy is optimised in the world model on exactly the reward it collects in MuJoCo.
 
 Every term is a function of the simulator state (through differentiable FK), the clean action, the command and
-the actuator PD law. Three Isaac terms need contact sensors and have no state-only form, so they are left out:
-``feet_air_time`` (contact timers), ``feet_force`` and ``feet_stumble`` (contact forces). Foot contact is a soft
-indicator of the sole height (``sigmoid((h - sole_z) / w)``), which makes the fly / slide / standing-contact
+the actuator PD law. Two Isaac terms need contact forces and have no state-only form, so they are left out:
+``feet_force`` and ``feet_stumble``. Foot contact is a soft indicator of the sole height (``sigmoid((h - sole_z) / w)``), which makes the fly / slide / standing-contact
 terms differentiable.
 
 When the command carries the gait clock (``cmd[..., 7:9]`` = [sin, cos] of the phase), ``feet_phase`` replaces
 ``feet_air_time``: an L1 penalty between each sole height and a swing reference (left foot swings in the first half
 of the stride, right in the second, half-sine arcs of ``swing_height``). It is dense and its gradient does not
 vanish at the ground, unlike every contact-gated or air-time form (v1-v6 stood or shuffled).
+
+``feet_air_time`` is Isaac's single-stance term on per-foot air timers that the caller carries next to the state
+(the sim reward term and the imagined rollout, as Dex-Supermimic carries its hold timers): the timer runs on a
+straight-through contact, hard in the forward pass and a wide sigmoid in the backward pass, so a planted foot (which
+the world model puts 1-2 cm under the ground, where the soft contact is saturated) still has a lift gradient.
 
 Rewards are returned already weighted and multiplied by ``dt`` like mjlab's reward manager.
 """
@@ -73,7 +77,7 @@ class LocoRewardCfg:
     w_knee_width: float = 0.5
     knee_ideal_width: float = 0.27 * 0.2010 / 0.2372  # G1's 0.27 m scaled by the T2 / G1 knee spacing
     knee_std: float = 0.1
-    # Not in the Isaac table: feet_air_time (contact timers) has no state-only form, and without a gait term the first
+    # Not in the Isaac table: without a gait term the first
     # world-model run (t2_loco_v1, 2026-10-27) walked at 0.28 m/s with both feet always on the ground. A moving robot is
     # rewarded for each foot's sole height as a linear ramp from ``swing_floor`` (below the ground: the world model
     # predicts a standing foot 1-2 cm under it, where a contact-gated term, v2-v4, had no gradient) to the swing
@@ -85,6 +89,10 @@ class LocoRewardCfg:
     # Gait-clock swing reference (t2_loco_v7): -w * sum_feet |sole_z - z_ref(phase)| while moving.
     w_feet_phase: float = -10.0
     gait_period: float = 0.8  # s, must match the command term's
+    # Isaac's feet_air_time_positive_biped (T2 flat teacher: 0.15, 0.4 s) on the carried air timers (t2_loco_v8).
+    w_feet_air_time: float = 0.0
+    air_time_threshold: float = 0.4
+    air_time_grad_width: float = 0.02  # m, backward-pass width of the timer's straight-through contact
     w_feet_contact_standing: float = 0.5
     w_feet_flat_standing: float = 0.175
     feet_flat_dead_zone_deg: float = 3.0
@@ -136,6 +144,7 @@ class LocoRewardCfg:
             + self.w_feet_contact_standing
             + self.w_feet_flat_standing
             + self.w_feet_swing
+            + self.w_feet_air_time * self.air_time_threshold
         )
 
 
@@ -188,6 +197,20 @@ def soft_contact(feet_pos_w: torch.Tensor, sole_offset: float, cfg: LocoRewardCf
     return torch.sigmoid((cfg.contact_height - sole_z) / cfg.contact_width)
 
 
+def timer_contact(feet_pos_w: torch.Tensor, sole_offset: float, cfg: LocoRewardCfg) -> torch.Tensor:
+    """Straight-through foot contact (…, 2) of the air timers: 1 below ``contact_height`` in the forward pass, the
+    gradient of a sigmoid of width ``air_time_grad_width`` in the backward pass."""
+    sole_z = feet_pos_w[..., 2] - sole_offset
+    hard = (sole_z < cfg.contact_height).to(sole_z.dtype)
+    soft = torch.sigmoid((cfg.contact_height - sole_z) / cfg.air_time_grad_width)
+    return hard + soft - soft.detach()
+
+
+def advance_air_time(air_time: torch.Tensor, contact: torch.Tensor, dt: float) -> torch.Tensor:
+    """Per-foot air timers (…, 2) after a step that ended with ``contact``: + dt in the air, 0 on the ground."""
+    return (air_time + dt) * (1.0 - contact)
+
+
 def advance_clock(clock: torch.Tensor, dt: float, period: float) -> torch.Tensor:
     """The gait clock [sin, cos] (…, 2) one step later (a rotation by 2 pi dt / period)."""
     d = 2.0 * math.pi * dt / period
@@ -226,6 +249,7 @@ def loco_reward_terms(
     prev_action: torch.Tensor,  # (…, 15)
     cmd: torch.Tensor,  # (…, 7) [vx, vy, wz, height, roll, pitch, yaw], or (…, 9) with the gait clock [sin, cos]
     term_prob: torch.Tensor,  # (…,) termination flag (sim) or probability (imagination)
+    air_time: torch.Tensor | None,  # (…, 2) feet air timers after this step (advance_air_time), None = term off
     soft_limits: torch.Tensor,  # (29, 2)
     default_joint_pos: torch.Tensor,  # (29,)
     sole_offset: float,
@@ -275,6 +299,13 @@ def loco_reward_terms(
         feet_phase = (1.0 - standing) * (sole_z - swing_reference(cmd[..., 7:9], cfg.swing_height)).abs().sum(-1)
     else:
         feet_phase = torch.zeros_like(standing)
+    if air_time is not None:
+        # Single stance pays the swing foot's air time, capped. Isaac takes the min with the stance foot's contact
+        # time, which is longer in walking (the stance foot landed before the swing foot lifted), so it is dropped.
+        stance = timer_contact(b.feet_pos_w, sole_offset, cfg).flip(-1)
+        feet_air_time = (1.0 - standing) * (stance * air_time.clamp(max=cfg.air_time_threshold)).sum(-1)
+    else:
+        feet_air_time = torch.zeros_like(standing)
 
     # ---- posture
     feet_mid_xy = 0.5 * (b.feet_pos_w[..., 0, :2] + b.feet_pos_w[..., 1, :2])
@@ -305,6 +336,7 @@ def loco_reward_terms(
         "feet_flat_standing": dt * cfg.w_feet_flat_standing * feet_flat_standing,
         "feet_swing": dt * cfg.w_feet_swing * feet_swing,
         "feet_phase": dt * cfg.w_feet_phase * feet_phase,
+        "feet_air_time": dt * cfg.w_feet_air_time * feet_air_time,
         "lin_vel_z_l2": dt * cfg.w_lin_vel_z * v_b[..., 2] ** 2,
         "ang_vel_xy_l2": dt * cfg.w_ang_vel_xy * (w_b[..., :2] ** 2).sum(-1),
         "energy": dt * cfg.w_energy * energy,
@@ -343,6 +375,7 @@ LOCO_REWARD_TERM_NAMES = (
     "feet_flat_standing",
     "feet_swing",
     "feet_phase",
+    "feet_air_time",
     "lin_vel_z_l2",
     "ang_vel_xy_l2",
     "energy",

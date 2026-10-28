@@ -158,3 +158,87 @@ def test_gait_clock(env):
     assert ro.cmd.shape == (4, 8, 9)
     for j in range(3):
         np.testing.assert_allclose(advance_clock(ro.cmd[j, :, 7:], rcfg.dt, rcfg.gait_period).detach().cpu().numpy(), ro.cmd[j + 1, :, 7:].detach().cpu().numpy(), atol=1e-5)
+
+
+def test_air_time():
+    """The feet air timers: straight-through contact (hard forward, wide-sigmoid gradient), the replay rows and the
+    sim reward carry the same timers, and imagination advances them on each imagined state's contact."""
+    from supermimic.config import TrainConfig
+    from supermimic.envs.loco_env_cfg import LocoEnvCfgArgs, make_loco_env
+    from supermimic.envs.mdp.loco_rewards import LocoRewardCfg, advance_air_time, timer_contact
+    from supermimic.envs.state_io import StateIO
+    from supermimic.imagination.loco_policy_trainer import LocoPolicyTrainer
+    from supermimic.policy.loco_nets import LocoCritic, LocoPolicy
+    from supermimic.world_model.loco_heads import LocoWorldModel
+
+    rcfg = LocoRewardCfg(w_feet_air_time=0.15)
+    # A planted foot 1.2 cm under the ground (where the world model puts it) is hard contact with a lift gradient.
+    sole = torch.tensor([[[0.0, 0.0, -0.012], [0.0, 0.0, 0.05]]], requires_grad=True)
+    c = timer_contact(sole, 0.0, rcfg)
+    np.testing.assert_allclose(c.detach().numpy(), [[1.0, 0.0]])
+    c[..., 0].sum().backward()
+    z = (rcfg.contact_height + 0.012) / rcfg.air_time_grad_width
+    sig = 1.0 / (1.0 + np.exp(-z))
+    np.testing.assert_allclose(sole.grad[0, 0, 2].item(), -sig * (1 - sig) / rcfg.air_time_grad_width, rtol=1e-4)
+    air = advance_air_time(torch.tensor([[0.1, 0.3]]), torch.tensor([[1.0, 0.0]]), 0.02)
+    np.testing.assert_allclose(air.numpy(), [[0.0, 0.32]], atol=1e-7)
+
+    env = make_loco_env(LocoEnvCfgArgs(num_envs=16, replay_capacity=128, obs_noise=False, seed=4, gait_clock=True, air_time=True), device="cuda:0", reward_cfg=rcfg)
+    try:
+        env.reset()
+        heads = env.loco_heads
+        io = StateIO(env)
+        timers = env.reward_manager.get_term_cfg("loco").func
+        lifted = 0.0
+        for _ in range(40):
+            env.step(0.5 * torch.randn(16, 15, device=env.device))
+            lifted = max(lifted, float(timers.air_time.max()))
+        assert lifted > 0.0  # some foot left the ground, so the checks below see non-zero timers
+
+        # The sim reward with the term's timers equals the analytic table on the reached state.
+        term = env.action_manager.get_term("joint_pos")
+        cmd_term = env.command_manager.get_term("velocity")
+        cmd = torch.cat([cmd_term.command, cmd_term.clock], dim=-1)
+        s_prev = io.read()
+        air_prev = timers.air_time.clone()
+        _, rew, *_ = env.step(0.5 * torch.randn(16, 15, device=env.device))
+        s = io.read()
+        b = heads.bodies(s)
+        air_next = advance_air_time(air_prev, timer_contact(b.feet_pos_w, heads.spec.sole_offset, rcfg), rcfg.dt)
+        fresh = env.episode_length_buf <= 1
+        np.testing.assert_allclose(air_next[~fresh].cpu().numpy(), timers.air_time[~fresh].cpu().numpy(), atol=1e-6)
+        ours = heads.reward(s_prev, s, term.clean_raw, term.prev_clean_raw, cmd, env.termination_manager.terminated.float(), air_time=air_next)["total"]
+        np.testing.assert_allclose(ours[~fresh].cpu().numpy(), rew[~fresh].cpu().numpy(), atol=1e-5)
+
+        # Replay rows: goal = command 7 + clock 2 + timers 2, the timers of row j+1 follow from row j and state j+1.
+        buf = env.recorder_manager.get_term("replay").buffer
+        w = buf.sample_windows(64, 4)
+        assert w.goal.shape[-1] == 11
+        for j in range(3):
+            feet = heads.bodies(w.states[j + 1]).feet_pos_w
+            expect = advance_air_time(w.goal[j, :, 9:], timer_contact(feet, heads.spec.sole_offset, rcfg), rcfg.dt)
+            np.testing.assert_allclose(expect.cpu().numpy(), w.goal[j + 1, :, 9:].cpu().numpy(), atol=1e-6)
+
+        # Imagination: the policy sees command + clock, the rollout goal carries the advancing timers, and the actor
+        # and critic update on them.
+        cfg = TrainConfig()
+        cfg.policy_trainer.compile = None
+        cfg.policy_trainer.batch_size = 32
+        cfg.policy_trainer.horizon = 4
+        cfg.world_model.hidden = (64, 64)
+        cfg.loco.policy.goal_dim = 9
+        cfg.loco.critic.goal_dim = 11
+        wm = LocoWorldModel(cfg.world_model, heads, env.device)
+        policy = LocoPolicy(cfg.loco.policy).to(env.device)
+        from supermimic.imagination.loco_rollout import loco_imagine
+
+        ro = loco_imagine(wm, policy, buf.sample_starts(8, 10), horizon=3, obs_noise=False)
+        assert ro.cmd.shape == (4, 8, 11)
+        for j in range(3):
+            feet = heads.bodies(ro.states[j + 1]).feet_pos_w
+            expect = advance_air_time(ro.cmd[j, :, 9:], timer_contact(feet, heads.spec.sole_offset, rcfg), rcfg.dt)
+            np.testing.assert_allclose(expect.detach().cpu().numpy(), ro.cmd[j + 1, :, 9:].detach().cpu().numpy(), atol=1e-6)
+        m = LocoPolicyTrainer(wm, policy, LocoCritic(cfg.loco.critic).to(env.device), cfg.policy_trainer).update(buf)
+        assert np.isfinite(m["imag_objective"]) and np.isfinite(m["critic_loss"]) and m["policy_grad_norm"] > 0
+    finally:
+        env.close()
