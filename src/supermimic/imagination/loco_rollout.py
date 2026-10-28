@@ -2,7 +2,10 @@
 
 The command of the start row is held over the horizon (0.64 s), except that a ``switch_prob`` share of the rollouts
 switches once, at a random step, to another start row's command, as the simulator's resampling does, so tracking
-through a command change gets a gradient (the policy is not told in advance). A gait clock after the command (9-d
+through a command change gets a gradient (the policy is not told in advance). With ``action_noise`` the dynamics
+receives the policy's action plus Gaussian noise, as the simulator executes it (reparameterised: the gradient passes
+through the noise to the policy output), while the reward and the observation see the clean action, as in the
+simulator; the noise smooths the objective around a standing policy, it does not replace the model gradient. A gait clock after the command (9-d
 goal) advances one control step per imagined step, as in the simulator. The replay goal may end with the foot timers
 of the start state (air, contact): they advance on each imagined state's contact and stay in the rollout's goal (the
 critic sees them, the policy does not). The arm joints keep the start row's normalised targets; the policy's 15
@@ -64,11 +67,11 @@ class LocoImagStep:
             mode = None if compile_mode == "default" else compile_mode
             self._fn = torch.compile(self._step, mode=mode, dynamic=False)
 
-    def _step(self, s, a15, a15_prev, arm29, xi, cmd, timers):
+    def _step(self, s, a15, a15_exec, a15_prev, arm29, xi, cmd, timers):
         a29 = arm29.index_copy(-1, self.ids, a15)
         a29_prev = arm29.index_copy(-1, self.ids, a15_prev)
         heads = self.wm.heads
-        s_next = self.wm.step(s, a29, xi)
+        s_next = self.wm.step(s, arm29.index_copy(-1, self.ids, a15_exec), xi)
         bodies = heads.bodies(s_next)
         logits = self.wm.termination_logits(s_next, bodies)
         d = torch.sigmoid(logits)
@@ -81,11 +84,11 @@ class LocoImagStep:
         obs_clean = heads.observation(s_next, a15, cmd, xi)
         return s_next, r, term_vec, logits, obs_clean, timers
 
-    def __call__(self, s, a15, a15_prev, arm29, xi, cmd, timers=None):
-        return self._fn(s, a15, a15_prev, arm29, xi, cmd, timers)
+    def __call__(self, s, a15, a15_prev, arm29, xi, cmd, timers=None, a15_exec=None):
+        return self._fn(s, a15, a15 if a15_exec is None else a15_exec, a15_prev, arm29, xi, cmd, timers)
 
 
-def loco_imagine(wm: LocoWorldModel, policy: LocoPolicy, start: StartBatch, horizon: int, obs_noise: bool = True, step_fn: LocoImagStep | None = None, switch_prob: float = 0.0) -> LocoRollout:
+def loco_imagine(wm: LocoWorldModel, policy: LocoPolicy, start: StartBatch, horizon: int, obs_noise: bool = True, step_fn: LocoImagStep | None = None, switch_prob: float = 0.0, action_noise: float = 0.0) -> LocoRollout:
     device = start.state.device
     n = start.state.shape[0]
     heads = wm.heads
@@ -129,7 +132,8 @@ def loco_imagine(wm: LocoWorldModel, policy: LocoPolicy, start: StartBatch, hori
             hist[-1] = torch.cat([last[:, :CMD_OBS], seen, last[:, CMD_OBS + CMD_DIM :]], dim=-1)
         obs_flat = flatten_term_major(torch.stack(hist, 0))
         a = policy(obs_flat, cmd)
-        s_next, r, term_vec, logits, obs_clean, timers = step_fn(s, a, a_prev, arm29, start.xi, cmd, timers)
+        a_exec = a + action_noise * torch.randn_like(a) if action_noise > 0.0 else a
+        s_next, r, term_vec, logits, obs_clean, timers = step_fn(s, a, a_prev, arm29, start.xi, cmd, timers, a_exec)
         d = torch.sigmoid(logits)
         c = c * (1.0 - d)
         term_sum += term_vec.detach().mean(-1)

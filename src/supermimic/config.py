@@ -55,6 +55,8 @@ class LocoCfg:
     rsi_prob: float = 0.5
     gait_clock: bool = True  # goal = command + gait clock; the swing reference (reward.w_feet_phase) needs it
     imag_switch_prob: float = 0.0  # share of imagined rollouts whose command switches once mid-horizon (t2_loco_v9)
+    imag_action_noise: float = 0.0  # std of the executed-action noise in imagination (t2_loco_v10)
+    imag_action_noise_decay: tuple[int, int] = (0, 0)  # iterations over which it fades linearly to 0 ((0, 0): constant)
     reward: LocoRewardCfg = field(default_factory=LocoRewardCfg)
     policy: LocoPolicyCfg = field(default_factory=LocoPolicyCfg)
     critic: LocoCriticCfg = field(default_factory=LocoCriticCfg)

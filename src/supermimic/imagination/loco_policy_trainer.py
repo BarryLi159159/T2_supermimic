@@ -17,6 +17,7 @@ class LocoPolicyTrainer:
     def __init__(self, wm: LocoWorldModel, policy: LocoPolicy, critic: LocoCritic, cfg: PolicyTrainerCfg, switch_prob: float = 0.0):
         self.wm, self.policy, self.critic, self.cfg = wm, policy, critic, cfg
         self.switch_prob = switch_prob
+        self.action_noise = 0.0  # set by the training loop's schedule
         self.opt = torch.optim.Adam(policy.parameters(), lr=cfg.lr, betas=cfg.betas)
         self.critic_opt = torch.optim.Adam(critic.parameters(), lr=cfg.critic_lr)
         self.step_fn = LocoImagStep(wm, compile_mode=cfg.compile)
@@ -41,7 +42,7 @@ class LocoPolicyTrainer:
         self.wm.requires_grad_(False)
         self.critic.requires_grad_(False)
         with torch.set_grad_enabled(train_actor):
-            ro = loco_imagine(self.wm, self.policy, start, cfg.horizon, obs_noise=cfg.obs_noise, step_fn=self.step_fn, switch_prob=self.switch_prob)
+            ro = loco_imagine(self.wm, self.policy, start, cfg.horizon, obs_noise=cfg.obs_noise, step_fn=self.step_fn, switch_prob=self.switch_prob, action_noise=self.action_noise)
             feat = self._critic_feat(ro)
             v_H = self.critic(feat[-1], ro.cmd[-1], xi_norm) if cfg.use_critic else None
             J = policy_objective(ro, v_H, cfg.gamma)

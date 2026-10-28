@@ -63,6 +63,7 @@ class LocoTrainer(Trainer):
             broadcast_params(m)
         self.wm_trainer = LocoWorldModelTrainer(self.wm, cfg.wm_trainer)
         self.policy_trainer = LocoPolicyTrainer(self.wm, self.policy, self.critic, cfg.policy_trainer, switch_prob=cfg.loco.imag_switch_prob)
+        self.policy_trainer.action_noise = cfg.loco.imag_action_noise
         self.max_step_reward = heads.reward_cfg.max_step_reward
         self._print_params()
 
@@ -79,11 +80,15 @@ class LocoTrainer(Trainer):
             "command/progress": self.command.progress,
             "command/error_vel_xy": float(self.command.metrics["error_vel_xy"].mean()),
             "command/error_vel_yaw": float(self.command.metrics["error_vel_yaw"].mean()),
+            "policy/imag_action_noise": self.policy_trainer.action_noise,
         }
 
     def _on_log(self, iteration: int) -> None:
         lo, hi = self.cfg.loco.curriculum_start, self.cfg.loco.curriculum_end
         self.command.set_progress((iteration - lo) / max(hi - lo, 1))
+        start, end = self.cfg.loco.imag_action_noise_decay
+        fade = 1.0 if end <= start else min(max((end - iteration) / (end - start), 0.0), 1.0)
+        self.policy_trainer.action_noise = self.cfg.loco.imag_action_noise * fade
 
     def load_weights(self, path: Path) -> None:
         """Fine-tune: weights and Adam moments from the checkpoint, iteration and schedule fresh."""

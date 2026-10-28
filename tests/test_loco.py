@@ -163,7 +163,7 @@ def test_gait_clock(env):
 
 def test_foot_timers_and_switches():
     """Isaac's contact-timer terms on carried foot timers (straight-through contact), the non-foot geoms' lowest points
-    against MuJoCo, the sim / replay / imagination timers agreeing, and imagined command switches."""
+    against MuJoCo, the sim / replay / imagination timers agreeing, imagined command switches and action noise."""
     import mujoco
 
     from supermimic.config import TrainConfig
@@ -285,7 +285,19 @@ def test_foot_timers_and_switches():
         torch.testing.assert_close(used[0], start.goal[:, :7])
         changes = (used[1:] != used[:-1]).any(-1).sum(0)
         assert int(changes.max()) <= 1 and int(changes.sum()) > 8  # one switch at most, most rows got a different command
-        m_pi = LocoPolicyTrainer(wm, policy, LocoCritic(cfg.loco.critic).to(env.device), cfg.policy_trainer, switch_prob=0.5).update(buf)
+        # Executed-action noise: without it the rollout is deterministic, with it the dynamics differ and the gradient
+        # still reaches the policy through the noise (the fresh dynamics' zero last layer would ignore the action).
+        with torch.no_grad():
+            torch.nn.init.normal_([m for m in wm.dynamics.modules() if isinstance(m, torch.nn.Linear)][-1].weight, std=1e-2)
+        plain = [loco_imagine(wm, policy, start, horizon=6, obs_noise=False).states for _ in range(2)]
+        torch.testing.assert_close(plain[0], plain[1])
+        noisy = loco_imagine(wm, policy, start, horizon=6, obs_noise=False, action_noise=0.3)
+        assert (noisy.states[1:] - plain[0][1:]).abs().max() > 1e-4
+        grads = torch.autograd.grad(noisy.rewards.sum(), list(policy.parameters()))
+        assert all(torch.isfinite(g).all() for g in grads) and sum(float(g.abs().sum()) for g in grads) > 0
+        trainer = LocoPolicyTrainer(wm, policy, LocoCritic(cfg.loco.critic).to(env.device), cfg.policy_trainer, switch_prob=0.5)
+        trainer.action_noise = 0.3
+        m_pi = trainer.update(buf)
         assert np.isfinite(m_pi["imag_objective"]) and np.isfinite(m_pi["critic_loss"]) and m_pi["policy_grad_norm"] > 0
     finally:
         env.close()
