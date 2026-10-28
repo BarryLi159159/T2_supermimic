@@ -14,10 +14,13 @@ When the command carries the gait clock (``cmd[..., 7:9]`` = [sin, cos] of the p
 of the stride, right in the second, half-sine arcs of ``swing_height``). It is dense and its gradient does not
 vanish at the ground, unlike every contact-gated or air-time form (v1-v6 stood or shuffled).
 
-``feet_air_time`` is Isaac's single-stance term on per-foot air timers that the caller carries next to the state
-(the sim reward term and the imagined rollout, as Dex-Supermimic carries its hold timers): the timer runs on a
-straight-through contact, hard in the forward pass and a wide sigmoid in the backward pass, so a planted foot (which
-the world model puts 1-2 cm under the ground, where the soft contact is saturated) still has a lift gradient.
+With ``foot_timers`` the caller carries per-foot air and contact timers next to the state (the sim reward term and
+the imagined rollout, as Dex-Supermimic carries its hold timers), and the three timer terms take Isaac's exact form:
+``feet_air_time`` (single stance, the shorter mode time, capped), ``feet_contact_standing_stable`` and
+``feet_flat_standing`` (both feet held for 0.5 s). The timers run on a straight-through contact, hard in the forward
+pass and a wide sigmoid in the backward pass, so a planted foot (which the world model puts 1-2 cm under the ground,
+where the soft contact is saturated) still has a lift gradient. ``undesired_contacts`` counts the non-foot collision
+geoms whose lowest point reaches the ground (from FK, ``LocoBodies.geom_low_z``).
 
 Rewards are returned already weighted and multiplied by ``dt`` like mjlab's reward manager.
 """
@@ -89,10 +92,15 @@ class LocoRewardCfg:
     # Gait-clock swing reference (t2_loco_v7): -w * sum_feet |sole_z - z_ref(phase)| while moving.
     w_feet_phase: float = -10.0
     gait_period: float = 0.8  # s, must match the command term's
-    # Isaac's feet_air_time_positive_biped (T2 flat teacher: 0.15, 0.4 s) on the carried air timers (t2_loco_v8).
+    # Isaac's contact-timer forms (t2_loco_v9, the teacher table): feet_air_time_positive_biped (T2 flat teacher: 0.15,
+    # 0.4 s) and the standing terms' 0.5 s sustained-contact gates. Off: feet_air_time is 0 and the standing terms use
+    # the instantaneous contact (v1-v7; v8 ran an air-timer-only variant, c0dc8fd).
+    foot_timers: bool = False
     w_feet_air_time: float = 0.0
     air_time_threshold: float = 0.4
-    air_time_grad_width: float = 0.02  # m, backward-pass width of the timer's straight-through contact
+    min_contact_time: float = 0.5
+    feet_flat_contact_ramp: float = 0.25
+    timer_grad_width: float = 0.02  # m, backward-pass width of the timers' straight-through contact
     w_feet_contact_standing: float = 0.5
     w_feet_flat_standing: float = 0.175
     feet_flat_dead_zone_deg: float = 3.0
@@ -109,6 +117,7 @@ class LocoRewardCfg:
     w_action_rate: float = -0.01
     w_fly: float = -1.0
     w_flat_orientation: float = -2.0
+    w_undesired_contacts: float = 0.0  # Isaac: -1 per non-foot body touching the ground
     w_termination: float = -200.0
     w_feet_slide: float = -0.25
     w_feet_too_near: float = -2.0
@@ -189,6 +198,7 @@ class LocoBodies:
     feet_lin_vel_w: torch.Tensor  # (…, 2, 3)
     knee_pos_w: torch.Tensor  # (…, 2, 3)
     com_xy_w: torch.Tensor  # (…, 2) whole-body centre of mass
+    geom_low_z: torch.Tensor  # (…, G) lowest point of each non-foot collision geom (its bounding box)
 
 
 def soft_contact(feet_pos_w: torch.Tensor, sole_offset: float, cfg: LocoRewardCfg) -> torch.Tensor:
@@ -198,17 +208,19 @@ def soft_contact(feet_pos_w: torch.Tensor, sole_offset: float, cfg: LocoRewardCf
 
 
 def timer_contact(feet_pos_w: torch.Tensor, sole_offset: float, cfg: LocoRewardCfg) -> torch.Tensor:
-    """Straight-through foot contact (…, 2) of the air timers: 1 below ``contact_height`` in the forward pass, the
-    gradient of a sigmoid of width ``air_time_grad_width`` in the backward pass."""
+    """Straight-through foot contact (…, 2) of the timers: 1 below ``contact_height`` in the forward pass, the
+    gradient of a sigmoid of width ``timer_grad_width`` in the backward pass."""
     sole_z = feet_pos_w[..., 2] - sole_offset
     hard = (sole_z < cfg.contact_height).to(sole_z.dtype)
-    soft = torch.sigmoid((cfg.contact_height - sole_z) / cfg.air_time_grad_width)
+    soft = torch.sigmoid((cfg.contact_height - sole_z) / cfg.timer_grad_width)
     return hard + soft - soft.detach()
 
 
-def advance_air_time(air_time: torch.Tensor, contact: torch.Tensor, dt: float) -> torch.Tensor:
-    """Per-foot air timers (…, 2) after a step that ended with ``contact``: + dt in the air, 0 on the ground."""
-    return (air_time + dt) * (1.0 - contact)
+def advance_foot_timers(timers: torch.Tensor, contact: torch.Tensor, dt: float) -> torch.Tensor:
+    """Per-foot timers (…, 4) [air L, air R, contact L, contact R] after a step that ended with ``contact`` (…, 2):
+    each runs while its foot is in that mode and restarts at 0 when the mode changes, like Isaac's contact sensor."""
+    air, held = timers[..., :2], timers[..., 2:]
+    return torch.cat([(air + dt) * (1.0 - contact), (held + dt) * contact], dim=-1)
 
 
 def advance_clock(clock: torch.Tensor, dt: float, period: float) -> torch.Tensor:
@@ -249,7 +261,7 @@ def loco_reward_terms(
     prev_action: torch.Tensor,  # (…, 15)
     cmd: torch.Tensor,  # (…, 7) [vx, vy, wz, height, roll, pitch, yaw], or (…, 9) with the gait clock [sin, cos]
     term_prob: torch.Tensor,  # (…,) termination flag (sim) or probability (imagination)
-    air_time: torch.Tensor | None,  # (…, 2) feet air timers after this step (advance_air_time), None = term off
+    foot_timers: torch.Tensor | None,  # (…, 4) after this step (advance_foot_timers), None = instantaneous forms
     soft_limits: torch.Tensor,  # (29, 2)
     default_joint_pos: torch.Tensor,  # (29,)
     sole_offset: float,
@@ -290,8 +302,23 @@ def loco_reward_terms(
     roll_excess = (cmd[..., 4].abs() - cfg.feet_flat_roll_dead_zone).clamp(min=0.0)
     pitch_excess = (cmd[..., 5].abs() - cfg.feet_flat_pitch_dead_zone).clamp(min=0.0)
     pose_gate = torch.exp(-((roll_excess / cfg.feet_flat_roll_scale) ** 2) - (pitch_excess / cfg.feet_flat_pitch_scale) ** 2)
-    feet_flat_standing = standing * both_down * pose_gate * flatness
-    feet_contact_standing = standing * both_down
+    if foot_timers is not None:
+        c = timer_contact(b.feet_pos_w, sole_offset, cfg)
+        air, held = foot_timers[..., :2], foot_timers[..., 2:]
+        # Isaac's feet_air_time_positive_biped: in single stance, the shorter of the feet's current mode times, capped.
+        in_mode = c * held + (1.0 - c) * air
+        single = c[..., 0] * (1.0 - c[..., 1]) + c[..., 1] * (1.0 - c[..., 0])
+        feet_air_time = (1.0 - standing) * single * in_mode.min(-1).values.clamp(max=cfg.air_time_threshold)
+        held_min = held.min(-1).values
+        both_held = (held > cfg.min_contact_time).all(-1).to(joint_pos.dtype)
+        feet_contact_standing = standing * both_held * torch.tanh(held_min / cfg.min_contact_time)
+        contact_gate = ((held_min - cfg.min_contact_time) / cfg.feet_flat_contact_ramp).clamp(0.0, 1.0)
+        feet_flat_standing = standing * contact_gate * pose_gate * flatness
+    else:
+        feet_air_time = torch.zeros_like(standing)
+        feet_contact_standing = standing * both_down
+        feet_flat_standing = standing * both_down * pose_gate * flatness
+    undesired_contacts = torch.sigmoid((cfg.contact_height - b.geom_low_z) / cfg.contact_width).sum(-1)
     sole_z = b.feet_pos_w[..., 2] - sole_offset
     swing = ((sole_z - cfg.swing_floor) / (cfg.swing_height - cfg.swing_floor)).clamp(0.0, 1.0).sum(-1)
     feet_swing = (1.0 - standing) * swing
@@ -299,13 +326,6 @@ def loco_reward_terms(
         feet_phase = (1.0 - standing) * (sole_z - swing_reference(cmd[..., 7:9], cfg.swing_height)).abs().sum(-1)
     else:
         feet_phase = torch.zeros_like(standing)
-    if air_time is not None:
-        # Single stance pays the swing foot's air time, capped. Isaac takes the min with the stance foot's contact
-        # time, which is longer in walking (the stance foot landed before the swing foot lifted), so it is dropped.
-        stance = timer_contact(b.feet_pos_w, sole_offset, cfg).flip(-1)
-        feet_air_time = (1.0 - standing) * (stance * air_time.clamp(max=cfg.air_time_threshold)).sum(-1)
-    else:
-        feet_air_time = torch.zeros_like(standing)
 
     # ---- posture
     feet_mid_xy = 0.5 * (b.feet_pos_w[..., 0, :2] + b.feet_pos_w[..., 1, :2])
@@ -343,6 +363,7 @@ def loco_reward_terms(
         "dof_acc_l2": dt * cfg.w_dof_acc * (acc**2).sum(-1),
         "action_rate_l2": dt * cfg.w_action_rate * ((action - prev_action) ** 2).sum(-1),
         "fly": dt * cfg.w_fly * fly,
+        "undesired_contacts": dt * cfg.w_undesired_contacts * undesired_contacts,
         "flat_orientation_l2": dt * cfg.w_flat_orientation * (projected_gravity(b.pelvis_quat_w)[..., :2] ** 2).sum(-1),
         "termination_penalty": dt * cfg.w_termination * term_prob,
         "feet_slide": dt * cfg.w_feet_slide * feet_slide,
@@ -382,6 +403,7 @@ LOCO_REWARD_TERM_NAMES = (
     "dof_acc_l2",
     "action_rate_l2",
     "fly",
+    "undesired_contacts",
     "flat_orientation_l2",
     "termination_penalty",
     "feet_slide",

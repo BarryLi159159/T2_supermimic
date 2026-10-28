@@ -54,6 +54,7 @@ class LocoCfg:
     rsi_clips: list[str] | None = None  # clip names (None = every npz in rsi_dir)
     rsi_prob: float = 0.5
     gait_clock: bool = True  # goal = command + gait clock; the swing reference (reward.w_feet_phase) needs it
+    imag_switch_prob: float = 0.0  # share of imagined rollouts whose command switches once mid-horizon (t2_loco_v9)
     reward: LocoRewardCfg = field(default_factory=LocoRewardCfg)
     policy: LocoPolicyCfg = field(default_factory=LocoPolicyCfg)
     critic: LocoCriticCfg = field(default_factory=LocoCriticCfg)

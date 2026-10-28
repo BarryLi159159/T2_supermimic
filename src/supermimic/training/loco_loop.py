@@ -19,7 +19,7 @@ class LocoTrainer(Trainer):
     def __init__(self, cfg):
         goal_dim = 9 if cfg.loco.gait_clock else 7
         cfg.loco.policy.goal_dim = goal_dim  # saved with the config / checkpoint, so evaluation rebuilds the same input
-        cfg.loco.critic.goal_dim = goal_dim + (2 if cfg.loco.reward.w_feet_air_time != 0 else 0)  # the air timers
+        cfg.loco.critic.goal_dim = goal_dim + (4 if cfg.loco.reward.foot_timers else 0)  # the foot timers
         super().__init__(cfg)
 
     def _build(self) -> None:
@@ -46,7 +46,7 @@ class LocoTrainer(Trainer):
                 rsi_prob=cfg.loco.rsi_prob,
                 gait_clock=cfg.loco.gait_clock,
                 gait_period=cfg.loco.reward.gait_period,
-                air_time=cfg.loco.reward.w_feet_air_time != 0,
+                foot_timers=cfg.loco.reward.foot_timers,
             ),
             device=self.device,
             reward_cfg=cfg.loco.reward,
@@ -62,7 +62,7 @@ class LocoTrainer(Trainer):
         for m in (self.wm, self.policy, self.critic):
             broadcast_params(m)
         self.wm_trainer = LocoWorldModelTrainer(self.wm, cfg.wm_trainer)
-        self.policy_trainer = LocoPolicyTrainer(self.wm, self.policy, self.critic, cfg.policy_trainer)
+        self.policy_trainer = LocoPolicyTrainer(self.wm, self.policy, self.critic, cfg.policy_trainer, switch_prob=cfg.loco.imag_switch_prob)
         self.max_step_reward = heads.reward_cfg.max_step_reward
         self._print_params()
 

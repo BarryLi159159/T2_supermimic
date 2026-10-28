@@ -64,7 +64,7 @@ class LocoEnvCfgArgs:
     rsi_prob: float = 0.5
     gait_clock: bool = False  # the goal (policy input, replay) carries the gait clock: 9-d instead of 7-d
     gait_period: float = 0.8
-    air_time: bool = False  # replay rows carry the feet air timers (the reward has feet_air_time)
+    foot_timers: bool = False  # replay rows carry the foot air / contact timers (the reward's Isaac timer forms)
 
 
 def make_loco_env_cfg(a: LocoEnvCfgArgs) -> ManagerBasedRlEnvCfg:
@@ -200,7 +200,7 @@ def make_loco_env_cfg(a: LocoEnvCfgArgs) -> ManagerBasedRlEnvCfg:
                 "command_name": "velocity",
                 "action_name": "joint_pos",
                 "gait_clock": a.gait_clock,
-                "air_time": a.air_time,
+                "foot_timers": a.foot_timers,
             }
         )
 

@@ -12,6 +12,7 @@ simulator, the learned head sees both.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 import mujoco
@@ -26,7 +27,7 @@ from supermimic.envs.mdp.loco_rewards import (
     loco_reward_terms,
 )
 from supermimic.kinematics.g1_fk import G1Kinematics
-from supermimic.kinematics.rotations import projected_gravity, quat_apply
+from supermimic.kinematics.rotations import projected_gravity, quat_apply, quat_mul
 from supermimic.robots import RobotSpec
 from supermimic.world_model.heads import split_state
 from supermimic.world_model.world_model import WorldModel, WorldModelCfg
@@ -80,6 +81,16 @@ class LocoHeads:
         self.body_mass = torch.tensor(np.array(model.body_mass[1:]), dtype=torch.float32, device=dev)
         self.body_ipos = torch.tensor(np.array(model.body_ipos[1:]), dtype=torch.float32, device=dev)
         self.total_mass = self.body_mass.sum()
+        # Non-foot collision geoms (Isaac's undesired_contacts bodies, one geom each): body, pose in the body, and the
+        # geom-frame bounding box whose lowest point is checked against the ground.
+        geoms = [g for g in range(model.ngeom) if re.match(r".*_collision$", model.geom(g).name) and not re.match(spec.foot_geom_regex, model.geom(g).name)]
+        f32 = lambda a: torch.tensor(np.array(a), dtype=torch.float32, device=dev)
+        self.geom_body = torch.tensor([fk.body_index(model.body(model.geom_bodyid[g]).name) for g in geoms], dtype=torch.long, device=dev)
+        self.geom_pos = f32(model.geom_pos[geoms])
+        self.geom_quat = f32(model.geom_quat[geoms])
+        self.geom_box_centre = f32(model.geom_aabb[geoms, :3])
+        self.geom_box_half = f32(model.geom_aabb[geoms, 3:])
+        self.eye = torch.eye(3, device=dev)
 
     # ------------------------------------------------------------------ kinematics
 
@@ -88,6 +99,12 @@ class LocoHeads:
         pos, quat, lin, ang = out["pos"], out["quat"], out["lin_vel"], out["ang_vel"]
         com = pos + quat_apply(quat, self.body_ipos.expand(pos.shape))
         com_xy = (self.body_mass[:, None] * com[..., :2]).sum(-2) / self.total_mass
+        body_pos, body_quat = pos[..., self.geom_body, :], quat[..., self.geom_body, :]
+        geom_quat = quat_mul(body_quat, self.geom_quat.expand(body_quat.shape))
+        centre_z = (body_pos + quat_apply(body_quat, self.geom_pos.expand(body_pos.shape)) + quat_apply(geom_quat, self.geom_box_centre.expand(body_pos.shape)))[..., 2]
+        reach_z = torch.zeros_like(centre_z)
+        for i in range(3):  # each box axis reaches |R[2, i]| * half_i below the centre
+            reach_z = reach_z + quat_apply(geom_quat, self.eye[i].expand(body_pos.shape))[..., 2].abs() * self.geom_box_half[:, i]
         return LocoBodies(
             pelvis_pos_w=pos[..., self.pelvis, :],
             pelvis_quat_w=quat[..., self.pelvis, :],
@@ -100,6 +117,7 @@ class LocoHeads:
             feet_lin_vel_w=lin[..., self.feet, :],
             knee_pos_w=pos[..., self.knees, :],
             com_xy_w=com_xy,
+            geom_low_z=centre_z - reach_z,
         )
 
     def torque(self, s: torch.Tensor, action29: torch.Tensor) -> torch.Tensor:
@@ -120,10 +138,10 @@ class LocoHeads:
         cmd: torch.Tensor,
         term_prob: torch.Tensor,
         bodies: LocoBodies | None = None,
-        air_time: torch.Tensor | None = None,
+        foot_timers: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Reward r_{t+1} of reaching s_next from s_prev under action29 (the clean 29-d action, arms included);
-        ``air_time`` is the feet air timers at s_next (None leaves feet_air_time at 0)."""
+        ``foot_timers`` are the feet air / contact timers at s_next (None: the instantaneous-contact forms)."""
         b = bodies if bodies is not None else self.bodies(s_next)
         _, _, q, _, _, qd = split_state(s_next)
         qd_prev = split_state(s_prev)[5]
@@ -138,7 +156,7 @@ class LocoHeads:
             prev_action=prev_action29[..., self.policy_ids],
             cmd=cmd,
             term_prob=term_prob,
-            air_time=air_time,
+            foot_timers=foot_timers,
             soft_limits=self.soft_limits,
             default_joint_pos=self.default_joint_pos,
             sole_offset=self.spec.sole_offset,
