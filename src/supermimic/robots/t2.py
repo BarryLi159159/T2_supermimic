@@ -12,6 +12,11 @@ v_knee)``: min(force_limit, that line) is Booster's piecewise curve exactly (abo
 where Booster outputs zero, which no tracked motion reaches). Gains are the "hard" t2_walk table that has run on the
 real T2 (natural frequency 10 Hz), wrists 18.21 / 1.449 for the hand's own weight. Action scale is Booster's
 0.25 * effort / kp per joint.
+
+``t2_v4`` is the same robot on the actuator as Booster_T2's sysID measured it on the real T2 (2026-10-28,
+config/t2_robot_config.py): the command delay 0-20 ms around the measured 10 ms, the parallel-linkage joints damped
+at the joint by the sent Kd x the armature ratio x 0.69, and Coulomb friction with stiction on every joint (MuJoCo's
+``frictionloss``). Gains, limits, action scale and the deployment table are unchanged.
 """
 
 from __future__ import annotations
@@ -35,6 +40,32 @@ T2_SHARPA_XML = T2_XML.with_name(
 
 PHYSICS_DT = 0.005
 DELAY_MAX_STEPS = 8  # 0-40 ms command latency, booster_train's range
+DELAY_MAX_STEPS_V4 = 4  # 0-20 ms around the 10 ms the sysID measured on every joint of the real T2
+# The Kd sent to a parallel-linkage joint (waist pitch / roll, ankle pitch / roll) acts on the motor side: the
+# joint-side damping the robot applies is the sent Kd x the linkage's armature ratio x this factor (six axes measured
+# 0.64-0.78; Booster's rule is 1, which left the waist and ankle pitch 2-3x underdamped in training).
+PARALLEL_KD_FACTOR_V4 = 0.69
+SENT_KD_PARALLEL = 1.7215  # the Kd the deployment table sends to the four parallel axes
+# Coulomb friction at the joint [N m], left / right averaged (Booster_T2 FRICTION table). MuJoCo's ``frictionloss``
+# is dry friction with stiction: a joint driven below it stays put. Training scales each joint of each robot once
+# per episode within JOINT_FRICTION_SCALE_V4 (one measurement per joint so far).
+JOINT_FRICTION_V4: dict[str, float] = {
+    ".*_hip_yaw_joint": 0.6,
+    ".*_hip_roll_joint": 0.65,
+    ".*_hip_pitch_joint": 0.95,
+    ".*_knee_pitch_joint": 0.72,
+    "waist_yaw_joint": 0.52,
+    "waist_roll_joint": 3.3,
+    "waist_pitch_joint": 2.6,
+    ".*_ankle_pitch_joint": 2.4,
+    ".*_ankle_roll_joint": 1.4,
+    ".*_shoulder_pitch_joint": 0.6,
+    ".*_shoulder_roll_joint": 0.63,
+    ".*_elbow_pitch_joint": 0.47,
+    ".*_elbow_yaw_joint": 0.4,
+    ".*_wrist_.*_joint": 0.3,
+}
+JOINT_FRICTION_SCALE_V4 = (0.5, 1.5)
 
 RPM = 2.0 * math.pi / 60.0
 
@@ -86,8 +117,17 @@ def booster_actuator(
     )
 
 
-def t2_actuators(delay_steps: int = DELAY_MAX_STEPS) -> tuple[DcMotorActuatorCfg, ...]:
-    """Gains: Booster_T2 config/t2_robot_config.py (= booster_deploy t2_walk), wrists 18.21 / 1.449."""
+def parallel_kd(motor: Motor, factor: float = PARALLEL_KD_FACTOR_V4) -> float:
+    """Joint-side damping of a parallel-linkage joint: the sent Kd x the linkage's armature ratio x the measured factor."""
+    return SENT_KD_PARALLEL * motor.armature / B6025x24.armature * factor
+
+
+def t2_actuators(
+    delay_steps: int = DELAY_MAX_STEPS, measured: bool = False
+) -> tuple[DcMotorActuatorCfg, ...]:
+    """Gains: Booster_T2 config/t2_robot_config.py (= booster_deploy t2_walk), wrists 18.21 / 1.449.
+    ``measured``: the four parallel axes damped as the sysID measured them (v4); the sent table is unchanged."""
+    kd_par = parallel_kd if measured else (lambda motor: SENT_KD_PARALLEL)
     legs = (
         ".*_hip_yaw_joint",
         ".*_hip_roll_joint",
@@ -99,10 +139,18 @@ def t2_actuators(delay_steps: int = DELAY_MAX_STEPS) -> tuple[DcMotorActuatorCfg
     wrists = (".*_wrist_pitch_joint", ".*_wrist_yaw_joint", ".*_wrist_roll_joint")
     return (
         booster_actuator(legs, 110.9343, 3.5311, B7629x22, delay_steps),
-        booster_actuator(("waist_roll_joint",), 206.9129, 1.7215, WAIST_ROLL, delay_steps),
-        booster_actuator(("waist_pitch_joint",), 155.9961, 1.7215, WAIST_PITCH, delay_steps),
-        booster_actuator((".*_ankle_pitch_joint",), 141.7042, 1.7215, ANKLE_PITCH, delay_steps),
-        booster_actuator((".*_ankle_roll_joint",), 52.6468, 1.7215, ANKLE_ROLL, delay_steps),
+        booster_actuator(
+            ("waist_roll_joint",), 206.9129, kd_par(WAIST_ROLL), WAIST_ROLL, delay_steps
+        ),
+        booster_actuator(
+            ("waist_pitch_joint",), 155.9961, kd_par(WAIST_PITCH), WAIST_PITCH, delay_steps
+        ),
+        booster_actuator(
+            (".*_ankle_pitch_joint",), 141.7042, kd_par(ANKLE_PITCH), ANKLE_PITCH, delay_steps
+        ),
+        booster_actuator(
+            (".*_ankle_roll_joint",), 52.6468, kd_par(ANKLE_ROLL), ANKLE_ROLL, delay_steps
+        ),
         booster_actuator((".*_shoulder_pitch_joint",), 67.1133, 2.1362, B6030x24, delay_steps),
         booster_actuator(arms, 54.0854, 1.7215, B6025x24, delay_steps),
         booster_actuator(wrists, 18.214394, 1.449455, B4522x35, delay_steps),
@@ -150,14 +198,38 @@ def get_sharpa_spec() -> mujoco.MjSpec:
     return mujoco.MjSpec.from_file(str(T2_SHARPA_XML))
 
 
-def get_t2_robot_cfg(delay_steps: int = DELAY_MAX_STEPS, sharpa: bool = False) -> EntityCfg:
+def joint_friction(name: str) -> float:
+    """Measured Coulomb friction of a joint [N m] (JOINT_FRICTION_V4)."""
+    for pattern, value in JOINT_FRICTION_V4.items():
+        if re.fullmatch(pattern, name):
+            return value
+    raise KeyError(f"no measured friction for joint {name!r}")
+
+
+def with_joint_friction(spec: mujoco.MjSpec) -> mujoco.MjSpec:
+    """Every hinge joint gets its measured frictionloss (the free joint none)."""
+    for joint in spec.joints:
+        if joint.type == mujoco.mjtJoint.mjJNT_HINGE:
+            joint.frictionloss = joint_friction(joint.name)
+    return spec
+
+
+def get_t2_robot_cfg(
+    delay_steps: int = DELAY_MAX_STEPS, sharpa: bool = False, measured: bool = False
+) -> EntityCfg:
+    """``measured``: the sysID actuator (v4): parallel damping x0.69 and joint friction; pass DELAY_MAX_STEPS_V4 with it."""
     articulation = EntityArticulationInfoCfg(
-        actuators=t2_actuators(delay_steps), soft_joint_pos_limit_factor=0.9
+        actuators=t2_actuators(delay_steps, measured), soft_joint_pos_limit_factor=0.9
     )
+    base_spec = get_sharpa_spec if sharpa else get_spec
+
+    def spec_fn() -> mujoco.MjSpec:
+        return with_joint_friction(base_spec()) if measured else base_spec()
+
     return EntityCfg(
         init_state=HOME_KEYFRAME,
         collisions=(FULL_COLLISION,),
-        spec_fn=get_sharpa_spec if sharpa else get_spec,
+        spec_fn=spec_fn,
         articulation=articulation,
     )
 
@@ -257,4 +329,19 @@ T2_NODELAY = replace(T2, name="t2_nodelay", entity_cfg=lambda: get_t2_robot_cfg(
 # Sharpa Wave hands: the wrist links carry the hand + flange (TWIST2 v3's URDF); train with the wrist payload event.
 T2_SHARPA = replace(
     T2, name="t2_sharpa", xml_path=T2_SHARPA_XML, entity_cfg=lambda: get_t2_robot_cfg(sharpa=True)
+)
+
+# v4: the actuator as the sysID measured it (delay 0-20 ms, parallel damping x0.69, joint friction); train with
+# --env.dr-v4 (Booster_T2 v4's robot-side randomisation). Same deployment table and action scale as t2.
+T2_V4 = replace(
+    T2,
+    name="t2_v4",
+    entity_cfg=lambda: get_t2_robot_cfg(DELAY_MAX_STEPS_V4, measured=True),
+    pd_gains=lambda: t2_pd_gains(t2_actuators(DELAY_MAX_STEPS_V4, measured=True)),
+)
+T2_V4_SHARPA = replace(
+    T2_V4,
+    name="t2_v4_sharpa",
+    xml_path=T2_SHARPA_XML,
+    entity_cfg=lambda: get_t2_robot_cfg(DELAY_MAX_STEPS_V4, sharpa=True, measured=True),
 )
