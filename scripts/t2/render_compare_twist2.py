@@ -85,7 +85,7 @@ def main() -> None:
     ps, clip = cs.policy, cs.policy.clip
     ms, ds = cs.mj_model, cs.mj_data
     wrist_mass = ms.body("left_wrist_roll_link").mass[0]
-    if (ps.trained_robot == "t2_sharpa") != a.sharpa or (wrist_mass > 1.0) != a.sharpa:
+    if ps.trained_robot.endswith("sharpa") != a.sharpa or (wrist_mass > 1.0) != a.sharpa:
         raise ValueError(f"hand mismatch: policy trained on {ps.trained_robot}, MuJoCo wrist link {wrist_mass:.3f} kg, --sharpa={a.sharpa}")
     qadr_s = [ms.joint(n).qposadr[0] for n in ps.policy_joints]
     vadr_s = [ms.joint(n).dofadr[0] for n in ps.policy_joints]
