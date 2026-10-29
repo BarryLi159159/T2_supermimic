@@ -63,7 +63,9 @@ def test_replay_rows_and_windows(env):
     rows = [t for t in range(buf.T) if buf.valid[e, t]]
     assert len(rows) > 5
     w = buf.sample_windows(256, 8)
-    assert w.states.shape == (9, 256, 71) and w.a_exec.shape == (8, 256, 29) and w.xi.shape == (256, 38)
+    from supermimic.envs.sim_context import XI_DIM
+
+    assert w.states.shape == (9, 256, 71) and w.a_exec.shape == (8, 256, 29) and w.xi.shape == (256, XI_DIM)
     assert torch.isfinite(w.states).all()
     # Executed action differs from the clean one by the injected noise only.
     d = (w.a_exec - w.a_clean).std().item()
@@ -93,11 +95,15 @@ def test_state_io_round_trip(env):
 def test_sim_context(env):
     rec = env.recorder_manager.get_term("replay")
     xi = rec.ctx.read()
-    assert xi.shape == (32, 38)
+    from supermimic.envs.sim_context import XI_DIM
+
+    assert xi.shape == (32, XI_DIM)
     fr = xi[:, 0]
     assert (fr >= 0.3 - 1e-6).all() and (fr <= 1.2 + 1e-6).all()
     assert xi[:, 1:30].abs().max() <= 0.01 + 1e-6
-    assert xi[:, 30:].abs().max() <= 0.05 + 1e-6
+    assert xi[:, 30:33].abs().max() <= 0.05 + 1e-6
+    # without dr_v4 the v4 factors read back as exactly 1 (friction, kp, kd) and 0 (torso mass added)
+    assert torch.equal(xi[:, 38:125], torch.ones_like(xi[:, 38:125])) and torch.equal(xi[:, 125], torch.zeros_like(xi[:, 125]))
     # Per-episode re-sampling: friction values should not all be identical across envs.
     assert fr.std() > 0.01
 

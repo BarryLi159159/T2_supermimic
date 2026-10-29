@@ -11,8 +11,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
+from mjlab.envs.mdp import dr
 from mjlab.managers.event_manager import RecomputeLevel, requires_model_fields
 from mjlab.managers.scene_entity_config import SceneEntityCfg
+
+from supermimic.envs.mdp.ramp import ramp_progress
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
@@ -100,3 +103,47 @@ def wrist_payload(
         model.body_iquat[env_ids, b] = _mat_to_quat(axes)
         env.wrist_payload[env_ids, 2 * k] = m_add
         env.wrist_payload[env_ids, 2 * k + 1] = dist
+
+
+def sensor_offsets(
+    env,
+    env_ids: torch.Tensor | None,
+    gyro_bias_rad_s: float,
+    imu_tilt_rad: float,
+) -> None:
+    """Per-episode IMU offsets (Booster_T2 v4): a gyro bias on each axis and a tilt of the measured gravity direction
+    (roll, pitch; a mounting error), both uniform within +-full x the ramp (``env.dr_ramp``). Read by
+    ``observations.base_ang_vel_biased`` / ``projected_gravity_tilted``; the policy sees them, xi does not (sensor, not dynamics)."""
+    n = env.num_envs
+    if not hasattr(env, "gyro_bias"):
+        env.gyro_bias = torch.zeros(n, 3, device=env.device)
+        env.imu_tilt = torch.zeros(n, 2, device=env.device)
+    ids = slice(None) if env_ids is None else env_ids
+    k = n if env_ids is None else len(env_ids)
+    p = ramp_progress(env)
+    env.gyro_bias[ids] = torch.empty(k, 3, device=env.device).uniform_(-1.0, 1.0) * (
+        gyro_bias_rad_s * p
+    )
+    env.imu_tilt[ids] = torch.empty(k, 2, device=env.device).uniform_(-1.0, 1.0) * (
+        imu_tilt_rad * p
+    )
+
+
+def pd_gains_ramped(
+    env,
+    env_ids: torch.Tensor | None,
+    kp_scale: float,
+    kd_scale: float,
+    asset_cfg: SceneEntityCfg | None = None,
+) -> None:
+    """Per-episode actuator gains x U(1 -+ scale x ramp) per joint (Booster_T2 v4: +-10 %, the sysID bound; the ramp is
+    ``env.dr_ramp``). The factors are read back into xi from the actuators' stiffness / damping tensors."""
+    p = ramp_progress(env)
+    dr.pd_gains(
+        env,
+        env_ids,
+        kp_range=(1.0 - kp_scale * p, 1.0 + kp_scale * p),
+        kd_range=(1.0 - kd_scale * p, 1.0 + kd_scale * p),
+        asset_cfg=asset_cfg if asset_cfg is not None else SceneEntityCfg("robot"),
+        operation="scale",
+    )

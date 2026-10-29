@@ -26,8 +26,13 @@ class DataCfg:
 
 @dataclass
 class EnvCfg:
-    robot: str = "g1"  # g1 | t2 | t2_sharpa (supermimic.robots)
+    robot: str = "g1"  # g1 | t2 | t2_sharpa | t2_v4 | t2_v4_sharpa (supermimic.robots)
     wrist_payload: bool = False  # Sharpa version: per-episode hand payload 0-1.5 kg at 5-20 cm
+    # Booster_T2 v4's robot-side randomisation (use with robot t2_v4*): joint friction x0.5-1.5, gains +-10 %, link
+    # mass x0.95-1.05, torso +-5 kg, ground friction 0.3-1.6, gyro / IMU-tilt offsets; noise, gains and offsets ramp
+    # from easy to full over dr_ramp_iterations (envs/mdp/ramp.py)
+    dr_v4: bool = False
+    dr_ramp_iterations: int = 10000
     num_envs: int = 4096
     episode_length_s: float = 10.0
     action_noise_std: float = 0.1

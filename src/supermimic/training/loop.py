@@ -100,6 +100,7 @@ class Trainer:
                 compact_library=cfg.env.compact_library,
                 anchor_obs=cfg.env.anchor_obs,
                 anchor_ori_only=cfg.env.anchor_ori_only,
+                dr_v4=cfg.env.dr_v4,
                 seed=cfg.seed + 1000 * self.rank,
             ),
             device=self.device,
@@ -255,7 +256,11 @@ class Trainer:
         finished_lens: list[float] = []
         last_log = time.time()
 
+        ramp = getattr(env, "dr_ramp", None)
         while self.iteration < sch.total_iterations:
+            if ramp is not None:
+                n_ramp = self.cfg.env.dr_ramp_iterations
+                ramp.progress = min(1.0, self.iteration / n_ramp) if n_ramp > 0 else 1.0
             # ---------------- (1) collect one vectorised env step
             t0 = time.perf_counter()
             action = self.act(obs)
@@ -352,6 +357,8 @@ class Trainer:
                     for k, v in timers.items():
                         self.writer.add_scalar(f"time/{k}_s_per_iter", v / sch.log_interval, it)
                     self.writer.add_scalar("time/hours", elapsed / 3600, it)
+                    if ramp is not None:
+                        self.writer.add_scalar("dr/progress", ramp.progress, it)
                     self.writer.add_scalar("time/updates", self.num_updates, it)
                     for k, v in self._extra_scalars().items():
                         self.writer.add_scalar(k, v, it)
