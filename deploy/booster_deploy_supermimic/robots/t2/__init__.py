@@ -16,6 +16,8 @@ from ...tracker import SuperMimicPolicyCfg
 
 CHECKPOINT = "robots/t2/models/t2_supermimic_bare_320000.onnx"  # bare 0.425 kg wrist link (official xml)
 SHARPA_CHECKPOINT = "robots/t2/models/t2_supermimic_sharpa_30000.onnx"  # Sharpa hand 1.64 kg + payload DR, fine-tuned from the bare 320k
+V4_CHECKPOINT = "robots/t2/models/t2_supermimic_v4_320000.onnx"  # t2_v4: the sysID-measured actuator + Booster_T2 v4 DR
+V4_SHARPA_CHECKPOINT = "robots/t2/models/t2_supermimic_v4_sharpa_30000.onnx"  # t2_v4_sharpa: fine-tuned from the v4 320k
 SHARPA_XML = os.path.join(os.path.dirname(__file__), "T2_31dof_sharpa.xml")  # official xml with the Sharpa wrist inertia (make_deploy_sharpa_xml.py)
 
 # v3 default pose (SuperMimic T2 HOME_KEYFRAME), head at zero
@@ -83,3 +85,13 @@ for path in sorted(glob.glob(os.path.join(MOTION_DIR, "*.npz"))):
     cfg.policy.checkpoint_path = SHARPA_CHECKPOINT
     cfg.robot = cfg.robot.replace(mjcf_path=SHARPA_XML)
     register_task(f"t2_supermimic_sharpa_{name}", cfg)
+    # v4 (bare and Sharpa): at the clip's end the robot goes back to Booster's walking mode, as Booster's own
+    # BeyondMimic T2 tasks do, instead of dropping into damping in the harness; a fall still ends in damping
+    for prefix, checkpoint, mjcf in (("v4", V4_CHECKPOINT, None), ("v4_sharpa", V4_SHARPA_CHECKPOINT, SHARPA_XML)):
+        cfg = T2SuperMimicControllerCfg()
+        cfg.policy.motion_path = motion_path
+        cfg.policy.checkpoint_path = checkpoint
+        cfg.booster = BoosterRobotControllerCfg(exit_mode="walking")
+        if mjcf is not None:
+            cfg.robot = cfg.robot.replace(mjcf_path=mjcf)
+        register_task(f"t2_supermimic_{prefix}_{name}", cfg)
