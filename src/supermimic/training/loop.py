@@ -311,6 +311,8 @@ class Trainer:
         last_log = time.time()
 
         ramp = getattr(env, "dr_ramp", None)
+        # the replay buffer is not in the checkpoint, so a resumed run collects for the warm-up again before updating
+        updates_from = self.iteration + sch.warmup_iterations
         while self.iteration < sch.total_iterations:
             if ramp is not None:
                 n_ramp = self.cfg.env.dr_ramp_iterations
@@ -335,7 +337,7 @@ class Trainer:
             self.iteration += 1
 
             # ---------------- (2)+(3) updates at the configured update-to-data ratio
-            if self.iteration >= sch.warmup_iterations:
+            if self.iteration >= updates_from:
                 self._utd_acc += sch.updates_per_env_step
                 while self._utd_acc >= 1.0:
                     self._utd_acc -= 1.0
