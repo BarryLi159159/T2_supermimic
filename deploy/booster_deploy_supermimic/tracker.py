@@ -1,7 +1,10 @@
 """SuperMimic whole-body tracking policy (T2, 29 joints, trunk = policy root = IMU body) for booster_deploy.
 
-The policy sees only proprioception (obs_layout.py) and the next K reference frames; the IMU quantities from
-robot.data (trunk orientation, trunk gyro) enter the observation as they are. Targets = default + per-joint
+The policy sees proprioception (obs_layout.py) and the next K reference frames; the IMU quantities from
+robot.data (trunk orientation, trunk gyro) enter the observation as they are. A contract with anchor_ori_only adds
+the reference trunk orientation in the robot trunk frame; the reference is turned about z once, at the first step,
+so that its heading matches the robot's (training starts every episode on the reference), and the heading error
+after that comes from the IMU yaw. Anchor position needs odometry and is refused. Targets = default + per-joint
 action_scale * action, the scale and the default pose coming from the <model>.json that scripts/export_onnx.py
 writes next to the ONNX graph. The two head joints are not in the policy and hold zero.
 """
@@ -18,7 +21,7 @@ from booster_deploy.controllers.base_controller import BaseController, Policy
 from booster_deploy.controllers.controller_cfg import PolicyCfg
 from booster_deploy.utils.isaaclab.configclass import configclass
 
-from .obs_layout import History, ReferenceClip, proprio_frame, quat_rotate_inverse, GRAVITY_W
+from .obs_layout import History, ReferenceClip, anchor_ori_b, proprio_frame, quat_conj, quat_mul, quat_rotate_inverse, yaw_quat, GRAVITY_W
 
 ROOT_BODY = "trunk"
 HEAD_JOINTS = ["aa_head_yaw_joint", "head_pitch_joint"]
@@ -54,8 +57,10 @@ class SuperMimicPolicy(Policy):
         self.default = np.asarray(meta["default_joint_pos"], dtype=np.float64)
         self.history_len = int(meta["history"])
         self.future_frames = int(meta["future_frames"])
-        if meta.get("anchor_obs", False):
-            raise ValueError("anchor observations cannot be built on the real robot; export a pure-proprio policy")
+        self.anchor_ori = bool(meta.get("anchor_obs", False))
+        if self.anchor_ori and not meta.get("anchor_ori_only", False):
+            raise ValueError("the anchor position cannot be built on the real robot (no odometry); export a pure-proprio or orientation-only policy")
+        self.ref_yaw_align = None  # quaternion turning the reference heading onto the robot's, set at the first step
 
         names = list(self.robot.cfg.joint_names)  # real-robot (serial) order
         self.policy_idx = np.array([names.index(n) for n in self.policy_joints])
@@ -80,6 +85,7 @@ class SuperMimicPolicy(Policy):
         self.frame = self.cfg.start_frame
         self.last_action[:] = 0.0
         self.history.reset()
+        self.ref_yaw_align = None
 
     def compute_observation(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         d = self.robot.data
@@ -90,6 +96,11 @@ class SuperMimicPolicy(Policy):
         frame = proprio_frame(q_all[self.policy_idx], qd_all[self.policy_idx], ang_vel_b, root_quat, self.last_action, self.default)
         obs_hist = self.history.push(frame)
         goal = self.clip.goal_window(self.frame, self.future_frames)
+        if self.anchor_ori:
+            k = min(self.frame, self.clip.num_frames - 1)
+            if self.ref_yaw_align is None:
+                self.ref_yaw_align = quat_mul(yaw_quat(root_quat), quat_conj(yaw_quat(self.clip.root_quat_w[k])))
+            goal = np.concatenate([goal, anchor_ori_b(root_quat, quat_mul(self.ref_yaw_align, self.clip.root_quat_w[k]))])
         return obs_hist, goal, root_quat
 
     def inference(self) -> torch.Tensor:

@@ -6,6 +6,7 @@ flattening; a fresh history is back-filled with the first frame):
 Goal input (K*68) = reference frames f .. f+K-1 (clamped at the clip end), each
   joint_pos - default (29) | joint_vel (29) | gravity in the reference root frame (3) | reference root angular
   velocity in the root frame (3) | reference root linear velocity in the root's heading (yaw) frame (3) | root height (1)
+  [+ with anchor_ori_only: reference trunk orientation in the robot trunk frame as rot6d (6), mjlab's motion_anchor_ori_b]
 Quaternions are wxyz. Joints are in the training model's order (the npz joint_names).
 """
 from __future__ import annotations
@@ -30,6 +31,28 @@ def yaw_quat(q: np.ndarray) -> np.ndarray:
     out[..., 0] = np.cos(yaw / 2)
     out[..., 3] = np.sin(yaw / 2)
     return out
+
+
+def quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    aw, ax, ay, az = a[..., 0], a[..., 1], a[..., 2], a[..., 3]
+    bw, bx, by, bz = b[..., 0], b[..., 1], b[..., 2], b[..., 3]
+    return np.stack([aw * bw - ax * bx - ay * by - az * bz,
+                     aw * bx + ax * bw + ay * bz - az * by,
+                     aw * by - ax * bz + ay * bw + az * bx,
+                     aw * bz + ax * by - ay * bx + az * bw], axis=-1)
+
+
+def quat_conj(q: np.ndarray) -> np.ndarray:
+    return q * np.array([1.0, -1.0, -1.0, -1.0])
+
+
+def anchor_ori_b(robot_quat_w: np.ndarray, ref_quat_w: np.ndarray) -> np.ndarray:
+    """Reference anchor orientation in the robot anchor frame: the first two columns of its rotation matrix,
+    row-major (mjlab's matrix[..., :2].reshape(6))."""
+    w, x, y, z = quat_mul(quat_conj(robot_quat_w), ref_quat_w)
+    return np.array([1 - 2 * (y * y + z * z), 2 * (x * y - w * z),
+                     2 * (x * y + w * z), 1 - 2 * (x * x + z * z),
+                     2 * (x * z - w * y), 2 * (y * z + w * x)])
 
 
 def proprio_frame(joint_pos: np.ndarray, joint_vel: np.ndarray, ang_vel_b: np.ndarray, root_quat_w: np.ndarray,
