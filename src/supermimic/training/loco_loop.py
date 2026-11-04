@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 
 from supermimic.envs.loco_env_cfg import LocoEnvCfgArgs, make_loco_env
+from supermimic.imagination.loco_amp import LocoAmp
 from supermimic.imagination.loco_policy_trainer import LocoPolicyTrainer
 from supermimic.policy.loco_nets import LocoCritic, LocoPolicy
 from supermimic.training.distributed import broadcast_params
@@ -18,8 +19,12 @@ from supermimic.world_model.wm_trainer import LocoWorldModelTrainer
 class LocoTrainer(Trainer):
     def __init__(self, cfg):
         goal_dim = 9 if cfg.loco.gait_clock else 7
-        cfg.loco.policy.goal_dim = goal_dim  # saved with the config / checkpoint, so evaluation rebuilds the same input
-        cfg.loco.critic.goal_dim = goal_dim + (4 if cfg.loco.reward.foot_timers else 0)  # the foot timers
+        cfg.loco.policy.goal_dim = (
+            goal_dim  # saved with the config / checkpoint, so evaluation rebuilds the same input
+        )
+        cfg.loco.critic.goal_dim = goal_dim + (
+            4 if cfg.loco.reward.foot_timers else 0
+        )  # the foot timers
         super().__init__(cfg)
 
     def _build(self) -> None:
@@ -62,7 +67,23 @@ class LocoTrainer(Trainer):
         for m in (self.wm, self.policy, self.critic):
             broadcast_params(m)
         self.wm_trainer = LocoWorldModelTrainer(self.wm, cfg.wm_trainer)
-        self.policy_trainer = LocoPolicyTrainer(self.wm, self.policy, self.critic, cfg.policy_trainer, switch_prob=cfg.loco.imag_switch_prob)
+        self.amp = None
+        if cfg.loco.amp.weight > 0.0:
+            assert rsi_files, (
+                "the AMP discriminator takes its reference transitions from the rsi clips"
+            )
+            self.amp = LocoAmp(cfg.loco.amp, heads, rsi_files, self.device)
+            print(
+                f"[INFO] AMP: {self.amp.ref_x.shape[0]} reference transitions from {len(rsi_files)} clips"
+            )
+        self.policy_trainer = LocoPolicyTrainer(
+            self.wm,
+            self.policy,
+            self.critic,
+            cfg.policy_trainer,
+            switch_prob=cfg.loco.imag_switch_prob,
+            amp=self.amp,
+        )
         self.policy_trainer.action_noise = cfg.loco.imag_action_noise
         self.max_step_reward = heads.reward_cfg.max_step_reward
         self._print_params()
@@ -70,10 +91,11 @@ class LocoTrainer(Trainer):
     # ------------------------------------------------------------------ hooks
 
     def _sampler_state(self) -> dict:
-        return {}
+        return self.amp.state_dict() if self.amp is not None else {}
 
     def _load_sampler_state(self, ck: dict) -> None:
-        pass
+        if self.amp is not None and "amp_disc" in ck:
+            self.amp.load_state_dict(ck)
 
     def _extra_scalars(self) -> dict[str, float]:
         return {
@@ -99,4 +121,6 @@ class LocoTrainer(Trainer):
         self.wm_trainer.opt.load_state_dict(ck["wm_opt"])
         self.policy_trainer.opt.load_state_dict(ck["policy_opt"])
         self.policy_trainer.critic_opt.load_state_dict(ck["critic_opt"])
-        print(f"[INFO] fine-tune from {path} (iteration {ck['iteration']}): weights and Adam moments loaded, schedule fresh")
+        print(
+            f"[INFO] fine-tune from {path} (iteration {ck['iteration']}): weights and Adam moments loaded, schedule fresh"
+        )

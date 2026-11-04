@@ -78,7 +78,9 @@ class LocoRewardCfg:
     w_cog: float = 0.5
     cog_sigma: float = 0.2
     w_knee_width: float = 0.5
-    knee_ideal_width: float = 0.27 * 0.2010 / 0.2372  # G1's 0.27 m scaled by the T2 / G1 knee spacing
+    knee_ideal_width: float = (
+        0.27 * 0.2010 / 0.2372
+    )  # G1's 0.27 m scaled by the T2 / G1 knee spacing
     knee_std: float = 0.1
     # Not in the Isaac table: without a gait term the first
     # world-model run (t2_loco_v1, 2026-10-27) walked at 0.28 m/s with both feet always on the ground. A moving robot is
@@ -169,12 +171,18 @@ class LocoJointIndex:
     hip_pitch: torch.Tensor
 
     @classmethod
-    def from_names(cls, joint_names: tuple[str, ...], policy_joints: tuple[str, ...], device) -> LocoJointIndex:
+    def from_names(
+        cls, joint_names: tuple[str, ...], policy_joints: tuple[str, ...], device
+    ) -> LocoJointIndex:
         def ids(pred):
-            return torch.tensor([i for i, n in enumerate(joint_names) if pred(n)], dtype=torch.long, device=device)
+            return torch.tensor(
+                [i for i, n in enumerate(joint_names) if pred(n)], dtype=torch.long, device=device
+            )
 
         return cls(
-            policy=torch.tensor([joint_names.index(j) for j in policy_joints], dtype=torch.long, device=device),
+            policy=torch.tensor(
+                [joint_names.index(j) for j in policy_joints], dtype=torch.long, device=device
+            ),
             hip_yaw_roll=ids(lambda n: "hip_yaw" in n or "hip_roll" in n),
             waist=ids(lambda n: "waist" in n),
             legs=ids(lambda n: "hip_pitch" in n or "knee" in n or "ankle" in n),
@@ -198,7 +206,9 @@ class LocoBodies:
     feet_lin_vel_w: torch.Tensor  # (…, 2, 3)
     knee_pos_w: torch.Tensor  # (…, 2, 3)
     com_xy_w: torch.Tensor  # (…, 2) whole-body centre of mass
-    geom_low_z: torch.Tensor  # (…, G) lowest point of each non-foot collision geom (its bounding box)
+    geom_low_z: (
+        torch.Tensor
+    )  # (…, G) lowest point of each non-foot collision geom (its bounding box)
 
 
 def soft_contact(feet_pos_w: torch.Tensor, sole_offset: float, cfg: LocoRewardCfg) -> torch.Tensor:
@@ -249,6 +259,12 @@ def _euler_rel_trunk(pelvis_quat_w: torch.Tensor, trunk_quat_w: torch.Tensor):
     return roll, pitch, yaw
 
 
+def standing_indicator(cmd: torch.Tensor, cfg: LocoRewardCfg) -> torch.Tensor:
+    """1 where the command's planar speed plus |yaw rate| is at or below the standing threshold (…,)."""
+    cmd_speed = _norm(cmd[..., :2]) + cmd[..., 2].abs()
+    return (cmd_speed <= cfg.standing_cmd_threshold).to(cmd.dtype)
+
+
 def loco_reward_terms(
     *,
     bodies: LocoBodies,
@@ -261,7 +277,8 @@ def loco_reward_terms(
     prev_action: torch.Tensor,  # (…, 15)
     cmd: torch.Tensor,  # (…, 7) [vx, vy, wz, height, roll, pitch, yaw], or (…, 9) with the gait clock [sin, cos]
     term_prob: torch.Tensor,  # (…,) termination flag (sim) or probability (imagination)
-    foot_timers: torch.Tensor | None,  # (…, 4) after this step (advance_foot_timers), None = instantaneous forms
+    foot_timers: torch.Tensor
+    | None,  # (…, 4) after this step (advance_foot_timers), None = instantaneous forms
     soft_limits: torch.Tensor,  # (29, 2)
     default_joint_pos: torch.Tensor,  # (29,)
     sole_offset: float,
@@ -275,8 +292,7 @@ def loco_reward_terms(
     v_yaw = quat_apply_inverse(pelvis_yaw, b.pelvis_lin_vel_w)
     v_b = quat_apply_inverse(b.pelvis_quat_w, b.pelvis_lin_vel_w)
     w_b = quat_apply_inverse(b.pelvis_quat_w, b.pelvis_ang_vel_w)
-    cmd_speed = _norm(cmd[..., :2]) + cmd[..., 2].abs()
-    standing = (cmd_speed <= cfg.standing_cmd_threshold).to(joint_pos.dtype)
+    standing = standing_indicator(cmd, cfg).to(joint_pos.dtype)
 
     # ---- tracking
     e_lin = ((cmd[..., :2] - v_yaw[..., :2]) ** 2).sum(-1)
@@ -301,29 +317,42 @@ def loco_reward_terms(
     flatness = torch.exp(-((tilt_excess / math.radians(cfg.feet_flat_std_deg)) ** 2)).mean(-1)
     roll_excess = (cmd[..., 4].abs() - cfg.feet_flat_roll_dead_zone).clamp(min=0.0)
     pitch_excess = (cmd[..., 5].abs() - cfg.feet_flat_pitch_dead_zone).clamp(min=0.0)
-    pose_gate = torch.exp(-((roll_excess / cfg.feet_flat_roll_scale) ** 2) - (pitch_excess / cfg.feet_flat_pitch_scale) ** 2)
+    pose_gate = torch.exp(
+        -((roll_excess / cfg.feet_flat_roll_scale) ** 2)
+        - (pitch_excess / cfg.feet_flat_pitch_scale) ** 2
+    )
     if foot_timers is not None:
         c = timer_contact(b.feet_pos_w, sole_offset, cfg)
         air, held = foot_timers[..., :2], foot_timers[..., 2:]
         # Isaac's feet_air_time_positive_biped: in single stance, the shorter of the feet's current mode times, capped.
         in_mode = c * held + (1.0 - c) * air
         single = c[..., 0] * (1.0 - c[..., 1]) + c[..., 1] * (1.0 - c[..., 0])
-        feet_air_time = (1.0 - standing) * single * in_mode.min(-1).values.clamp(max=cfg.air_time_threshold)
+        feet_air_time = (
+            (1.0 - standing) * single * in_mode.min(-1).values.clamp(max=cfg.air_time_threshold)
+        )
         held_min = held.min(-1).values
         both_held = (held > cfg.min_contact_time).all(-1).to(joint_pos.dtype)
         feet_contact_standing = standing * both_held * torch.tanh(held_min / cfg.min_contact_time)
-        contact_gate = ((held_min - cfg.min_contact_time) / cfg.feet_flat_contact_ramp).clamp(0.0, 1.0)
+        contact_gate = ((held_min - cfg.min_contact_time) / cfg.feet_flat_contact_ramp).clamp(
+            0.0, 1.0
+        )
         feet_flat_standing = standing * contact_gate * pose_gate * flatness
     else:
         feet_air_time = torch.zeros_like(standing)
         feet_contact_standing = standing * both_down
         feet_flat_standing = standing * both_down * pose_gate * flatness
-    undesired_contacts = torch.sigmoid((cfg.contact_height - b.geom_low_z) / cfg.contact_width).sum(-1)
+    undesired_contacts = torch.sigmoid((cfg.contact_height - b.geom_low_z) / cfg.contact_width).sum(
+        -1
+    )
     sole_z = b.feet_pos_w[..., 2] - sole_offset
-    swing = ((sole_z - cfg.swing_floor) / (cfg.swing_height - cfg.swing_floor)).clamp(0.0, 1.0).sum(-1)
+    swing = (
+        ((sole_z - cfg.swing_floor) / (cfg.swing_height - cfg.swing_floor)).clamp(0.0, 1.0).sum(-1)
+    )
     feet_swing = (1.0 - standing) * swing
     if cmd.shape[-1] >= 9:
-        feet_phase = (1.0 - standing) * (sole_z - swing_reference(cmd[..., 7:9], cfg.swing_height)).abs().sum(-1)
+        feet_phase = (1.0 - standing) * (
+            sole_z - swing_reference(cmd[..., 7:9], cfg.swing_height)
+        ).abs().sum(-1)
     else:
         feet_phase = torch.zeros_like(standing)
 
@@ -351,7 +380,9 @@ def loco_reward_terms(
         "track_body_pitch_exp": dt * cfg.w_track_pitch * torch.exp(-e_pitch / cfg.std_pitch**2),
         "track_body_yaw_exp": dt * cfg.w_track_yaw * torch.exp(-e_yaw / cfg.std_yaw**2),
         "center_of_gravity_tracking": dt * cfg.w_cog * torch.exp(-cog_dist_sq / cfg.cog_sigma**2),
-        "knee_stance_width": dt * cfg.w_knee_width * torch.exp(-((knee_width - cfg.knee_ideal_width) ** 2) / cfg.knee_std**2),
+        "knee_stance_width": dt
+        * cfg.w_knee_width
+        * torch.exp(-((knee_width - cfg.knee_ideal_width) ** 2) / cfg.knee_std**2),
         "feet_contact_standing_stable": dt * cfg.w_feet_contact_standing * feet_contact_standing,
         "feet_flat_standing": dt * cfg.w_feet_flat_standing * feet_flat_standing,
         "feet_swing": dt * cfg.w_feet_swing * feet_swing,
@@ -364,7 +395,9 @@ def loco_reward_terms(
         "action_rate_l2": dt * cfg.w_action_rate * ((action - prev_action) ** 2).sum(-1),
         "fly": dt * cfg.w_fly * fly,
         "undesired_contacts": dt * cfg.w_undesired_contacts * undesired_contacts,
-        "flat_orientation_l2": dt * cfg.w_flat_orientation * (projected_gravity(b.pelvis_quat_w)[..., :2] ** 2).sum(-1),
+        "flat_orientation_l2": dt
+        * cfg.w_flat_orientation
+        * (projected_gravity(b.pelvis_quat_w)[..., :2] ** 2).sum(-1),
         "termination_penalty": dt * cfg.w_termination * term_prob,
         "feet_slide": dt * cfg.w_feet_slide * feet_slide,
         "feet_too_near": dt * cfg.w_feet_too_near * feet_too_near,
@@ -372,9 +405,15 @@ def loco_reward_terms(
         "joint_deviation_hip": dt * cfg.w_joint_deviation_hip * dev[..., idx.hip_yaw_roll].sum(-1),
         "joint_deviation_waists": dt * cfg.w_joint_deviation_waist * dev[..., idx.waist].sum(-1),
         "joint_deviation_legs": dt * cfg.w_joint_deviation_legs * dev[..., idx.legs].sum(-1),
-        "joint_torque_limits_waists": dt * cfg.w_torque_limit_waist * torque_excess(idx.waist, cfg.soft_torque_waist),
-        "joint_torque_limits_ankles": dt * cfg.w_torque_limit_ankle * torque_excess(idx.ankle, cfg.soft_torque_ankle),
-        "joint_torque_limits_hip_pitch": dt * cfg.w_torque_limit_hip_pitch * torque_excess(idx.hip_pitch, cfg.soft_torque_hip_pitch),
+        "joint_torque_limits_waists": dt
+        * cfg.w_torque_limit_waist
+        * torque_excess(idx.waist, cfg.soft_torque_waist),
+        "joint_torque_limits_ankles": dt
+        * cfg.w_torque_limit_ankle
+        * torque_excess(idx.ankle, cfg.soft_torque_ankle),
+        "joint_torque_limits_hip_pitch": dt
+        * cfg.w_torque_limit_hip_pitch
+        * torque_excess(idx.hip_pitch, cfg.soft_torque_hip_pitch),
     }
     total = None
     for v in terms.values():

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from supermimic.envs.mdp.loco_rewards import LocoRewardCfg
+from supermimic.imagination.loco_amp import LocoAmpCfg
 from supermimic.imagination.policy_trainer import PolicyTrainerCfg
 from supermimic.policy.loco_nets import LocoCriticCfg, LocoPolicyCfg
 from supermimic.policy.nets import CriticCfg, PolicyCfg
@@ -44,7 +45,9 @@ class EnvCfg:
     future_frames: int = 10
     compact_library: bool = False
     anchor_obs: bool = False
-    anchor_ori_only: bool = False  # with anchor_obs: reference root orientation only (6-d, IMU-observable), no position
+    anchor_ori_only: bool = (
+        False  # with anchor_obs: reference root orientation only (6-d, IMU-observable), no position
+    )
 
 
 @dataclass
@@ -53,15 +56,29 @@ class LocoCfg:
 
     resampling_time_range: tuple[float, float] = (3.0, 6.0)
     rel_standing_envs: float = 0.4
-    curriculum_start: int = 50_000  # iterations over which the torso command ranges widen (Isaac: 20k-60k PPO it)
+    curriculum_start: int = (
+        50_000  # iterations over which the torso command ranges widen (Isaac: 20k-60k PPO it)
+    )
     curriculum_end: int = 250_000
-    rsi_dir: Path | None = None  # reference-state initialisation: start rsi_prob of the episodes from these clips
+    rsi_dir: Path | None = (
+        None  # reference-state initialisation: start rsi_prob of the episodes from these clips
+    )
     rsi_clips: list[str] | None = None  # clip names (None = every npz in rsi_dir)
     rsi_prob: float = 0.5
-    gait_clock: bool = True  # goal = command + gait clock; the swing reference (reward.w_feet_phase) needs it
-    imag_switch_prob: float = 0.0  # share of imagined rollouts whose command switches once mid-horizon (t2_loco_v9)
+    gait_clock: bool = (
+        True  # goal = command + gait clock; the swing reference (reward.w_feet_phase) needs it
+    )
+    imag_switch_prob: float = (
+        0.0  # share of imagined rollouts whose command switches once mid-horizon (t2_loco_v9)
+    )
     imag_action_noise: float = 0.0  # std of the executed-action noise in imagination (t2_loco_v10)
-    imag_action_noise_decay: tuple[int, int] = (0, 0)  # iterations over which it fades linearly to 0 ((0, 0): constant)
+    imag_action_noise_decay: tuple[int, int] = (
+        0,
+        0,
+    )  # iterations over which it fades linearly to 0 ((0, 0): constant)
+    amp: LocoAmpCfg = field(
+        default_factory=LocoAmpCfg
+    )  # adversarial motion prior on the rsi clips (t2_loco_v11)
     reward: LocoRewardCfg = field(default_factory=LocoRewardCfg)
     policy: LocoPolicyCfg = field(default_factory=LocoPolicyCfg)
     critic: LocoCriticCfg = field(default_factory=LocoCriticCfg)
@@ -75,8 +92,12 @@ class ScheduleCfg:
     warmup_iterations: int = 40  # env steps before the first update (fills k-step windows)
     lr_final_ratio: float = 0.03
     lr_decay_fraction: float = 250_000 / 320_000
-    lr_warmup_iterations: int = 0  # linear ramp of the learning rate from 0; for fine-tuning a converged checkpoint
-    wm_only_iterations: int = 0  # neither actor nor critic is updated before this iteration (world-model warm-up)
+    lr_warmup_iterations: int = (
+        0  # linear ramp of the learning rate from 0; for fine-tuning a converged checkpoint
+    )
+    wm_only_iterations: int = (
+        0  # neither actor nor critic is updated before this iteration (world-model warm-up)
+    )
     policy_freeze_iterations: int = 0  # actor not updated before this iteration (world model / critic adapt first when fine-tuning on changed dynamics)
     log_interval: int = 50  # iterations
     checkpoint_interval: int = 4000  # iterations

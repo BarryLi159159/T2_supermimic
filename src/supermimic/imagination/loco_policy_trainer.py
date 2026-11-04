@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 
 from supermimic.data.replay_buffer import ReplayBuffer
+from supermimic.imagination.loco_amp import LocoAmp
 from supermimic.imagination.loco_rollout import LocoImagStep, LocoRollout, loco_imagine
 from supermimic.imagination.objective import gae_targets, policy_objective
 from supermimic.imagination.policy_trainer import PolicyTrainerCfg
@@ -14,13 +15,31 @@ from supermimic.world_model.loco_heads import LocoWorldModel
 
 
 class LocoPolicyTrainer:
-    def __init__(self, wm: LocoWorldModel, policy: LocoPolicy, critic: LocoCritic, cfg: PolicyTrainerCfg, switch_prob: float = 0.0):
+    def __init__(
+        self,
+        wm: LocoWorldModel,
+        policy: LocoPolicy,
+        critic: LocoCritic,
+        cfg: PolicyTrainerCfg,
+        switch_prob: float = 0.0,
+        amp: LocoAmp | None = None,
+    ):
         self.wm, self.policy, self.critic, self.cfg = wm, policy, critic, cfg
         self.switch_prob = switch_prob
+        self.amp = amp
         self.action_noise = 0.0  # set by the training loop's schedule
         self.opt = torch.optim.Adam(policy.parameters(), lr=cfg.lr, betas=cfg.betas)
         self.critic_opt = torch.optim.Adam(critic.parameters(), lr=cfg.critic_lr)
-        self.step_fn = LocoImagStep(wm, compile_mode=cfg.compile)
+        if amp is None:
+            self.step_fn = LocoImagStep(wm, compile_mode=cfg.compile)
+        else:
+            self.step_fn = LocoImagStep(
+                wm,
+                compile_mode=cfg.compile,
+                amp=amp.disc,
+                amp_weight=amp.cfg.weight,
+                amp_moving_only=amp.cfg.moving_only,
+            )
         self.skipped = 0
 
     def set_lr(self, lr: float) -> None:
@@ -37,12 +56,24 @@ class LocoPolicyTrainer:
         cfg = self.cfg
         start = buffer.sample_starts(cfg.batch_size, cfg.history)
         xi_norm = self.wm.spec.normalize_xi(start.xi)
+        m_amp = self.amp.update(buffer) if self.amp is not None else {}
 
-        # ---- actor: BPTT through the frozen world model
+        # ---- actor: BPTT through the frozen world model (and the frozen discriminator)
         self.wm.requires_grad_(False)
         self.critic.requires_grad_(False)
+        if self.amp is not None:
+            self.amp.disc.requires_grad_(False)
         with torch.set_grad_enabled(train_actor):
-            ro = loco_imagine(self.wm, self.policy, start, cfg.horizon, obs_noise=cfg.obs_noise, step_fn=self.step_fn, switch_prob=self.switch_prob, action_noise=self.action_noise)
+            ro = loco_imagine(
+                self.wm,
+                self.policy,
+                start,
+                cfg.horizon,
+                obs_noise=cfg.obs_noise,
+                step_fn=self.step_fn,
+                switch_prob=self.switch_prob,
+                action_noise=self.action_noise,
+            )
             feat = self._critic_feat(ro)
             v_H = self.critic(feat[-1], ro.cmd[-1], xi_norm) if cfg.use_critic else None
             J = policy_objective(ro, v_H, cfg.gamma)
@@ -56,13 +87,18 @@ class LocoPolicyTrainer:
                 torch.nn.utils.clip_grad_value_(self.policy.parameters(), cfg.grad_clip_value)
                 self.opt.step()
             else:
-                self.skipped += 1  # a non-finite gradient (one bad rollout) must not poison the weights
+                self.skipped += (
+                    1  # a non-finite gradient (one bad rollout) must not poison the weights
+                )
         else:
             gn = torch.zeros(())
         self.wm.requires_grad_(True)
         self.critic.requires_grad_(True)
+        if self.amp is not None:
+            self.amp.disc.requires_grad_(True)
 
         metrics = {
+            **m_amp,
             "imag_objective": float(J.detach()),
             "imag_return_undisc": float((ro.survival[:-1] * ro.rewards).sum(0).mean().detach()),
             "imag_reward_mean": float(ro.rewards.mean().detach()),
@@ -82,8 +118,14 @@ class LocoPolicyTrainer:
                 H1, n, _ = feat_d.shape
                 cmd_rep = ro.cmd
                 xi_rep = xi_norm[None].expand(H1, n, -1)
-                values = self.critic(feat_d.reshape(H1 * n, -1), cmd_rep.reshape(H1 * n, -1), xi_rep.reshape(H1 * n, -1)).reshape(H1, n)
-                targets = gae_targets(ro.rewards.detach(), ro.dhat[1:].detach(), values, cfg.gamma, cfg.gae_lambda)
+                values = self.critic(
+                    feat_d.reshape(H1 * n, -1),
+                    cmd_rep.reshape(H1 * n, -1),
+                    xi_rep.reshape(H1 * n, -1),
+                ).reshape(H1, n)
+                targets = gae_targets(
+                    ro.rewards.detach(), ro.dhat[1:].detach(), values, cfg.gamma, cfg.gae_lambda
+                )
                 X_feat = feat_d[:-1].reshape(-1, feat_d.shape[-1])
                 X_cmd = cmd_rep[:-1].reshape(-1, cmd_rep.shape[-1])
                 X_xi = xi_rep[:-1].reshape(-1, xi_rep.shape[-1])

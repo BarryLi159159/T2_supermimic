@@ -5,7 +5,9 @@ switches once, at a random step, to another start row's command, as the simulato
 through a command change gets a gradient (the policy is not told in advance). With ``action_noise`` the dynamics
 receives the policy's action plus Gaussian noise, as the simulator executes it (reparameterised: the gradient passes
 through the noise to the policy output), while the reward and the observation see the clean action, as in the
-simulator; the noise smooths the objective around a standing policy, it does not replace the model gradient. A gait clock after the command (9-d
+simulator; the noise smooths the objective around a standing policy, it does not replace the model gradient. With an
+``amp`` discriminator (``loco_amp.py``) its style reward of each imagined transition joins the task reward while the
+command moves. A gait clock after the command (9-d
 goal) advances one control step per imagined step, as in the simulator. The replay goal may end with the foot timers
 of the start state (air, contact): they advance on each imagined state's contact and stay in the rollout's goal (the
 critic sees them, the policy does not). The arm joints keep the start row's normalised targets; the policy's 15
@@ -24,14 +26,20 @@ from supermimic.envs.mdp.loco_rewards import (
     LOCO_REWARD_TERM_NAMES,
     advance_clock,
     advance_foot_timers,
+    standing_indicator,
     timer_contact,
 )
+from supermimic.imagination.loco_amp import LocoDiscriminator, amp_features
 from supermimic.policy.loco_nets import LocoPolicy
 from supermimic.world_model.loco_heads import CMD_DIM, LOCO_OBS_TERMS, LocoWorldModel
 
 # Isaac's sensor noise (uniform half-widths) in the 58-d observation order; commands and actions are exact.
-LOCO_OBS_NOISE_HALF = torch.tensor([0.2] * 3 + [0.05] * 3 + [0.0] * 7 + [0.01] * 15 + [1.5] * 15 + [0.0] * 15)
-CMD_OBS = 6  # the command's offset in one observation frame (after base_ang_vel 3, projected_gravity 3)
+LOCO_OBS_NOISE_HALF = torch.tensor(
+    [0.2] * 3 + [0.05] * 3 + [0.0] * 7 + [0.01] * 15 + [1.5] * 15 + [0.0] * 15
+)
+CMD_OBS = (
+    6  # the command's offset in one observation frame (after base_ang_vel 3, projected_gravity 3)
+)
 
 
 @dataclass
@@ -41,7 +49,9 @@ class LocoRollout:
     rewards: torch.Tensor  # (H, n)      r_{t+1}
     dhat: torch.Tensor  # (H+1, n)    predicted termination prob of s_t (d_0 = 0)
     survival: torch.Tensor  # (H+1, n)    c_t
-    cmd: torch.Tensor  # (H+1, n, G) goal at each state (7, + 2 with the gait clock, + 2 with the air timers)
+    cmd: (
+        torch.Tensor
+    )  # (H+1, n, G) goal at each state (7, + 2 with the gait clock, + 2 with the air timers)
     reward_terms: dict  # mean of each reward term over the rollout (diagnostics)
 
 
@@ -59,15 +69,23 @@ def flatten_term_major(hist: torch.Tensor, terms=LOCO_OBS_TERMS) -> torch.Tensor
 class LocoImagStep:
     """One imagined step (dynamics, FK, reward, termination logits, next observation) as one compiled function."""
 
-    def __init__(self, wm: LocoWorldModel, compile_mode: str | None = None):
+    def __init__(
+        self,
+        wm: LocoWorldModel,
+        compile_mode: str | None = None,
+        amp: LocoDiscriminator | None = None,
+        amp_weight: float = 0.0,
+        amp_moving_only: bool = True,
+    ):
         self.wm = wm
         self.ids = wm.heads.policy_ids
+        self.amp, self.amp_weight, self.amp_moving_only = amp, amp_weight, amp_moving_only
         self._fn = self._step
         if compile_mode:
             mode = None if compile_mode == "default" else compile_mode
             self._fn = torch.compile(self._step, mode=mode, dynamic=False)
 
-    def _step(self, s, a15, a15_exec, a15_prev, arm29, xi, cmd, timers):
+    def _step(self, s, a15, a15_exec, a15_prev, arm29, xi, cmd, timers, amp_feat):
         a29 = arm29.index_copy(-1, self.ids, a15)
         a29_prev = arm29.index_copy(-1, self.ids, a15_prev)
         heads = self.wm.heads
@@ -77,18 +95,51 @@ class LocoImagStep:
         d = torch.sigmoid(logits)
         if timers is not None:
             rcfg = heads.reward_cfg
-            timers = advance_foot_timers(timers, timer_contact(bodies.feet_pos_w, heads.spec.sole_offset, rcfg), rcfg.dt)
+            timers = advance_foot_timers(
+                timers, timer_contact(bodies.feet_pos_w, heads.spec.sole_offset, rcfg), rcfg.dt
+            )
         terms = heads.reward(s, s_next, a29, a29_prev, cmd, d, bodies, timers)
         r = terms["total"]
-        term_vec = torch.stack([terms[k] for k in LOCO_REWARD_TERM_NAMES], dim=0)
+        r_amp = torch.zeros_like(r)
+        if self.amp is not None:
+            amp_feat_next = amp_features(s_next, bodies, heads)
+            gate = 1.0 - standing_indicator(cmd, heads.reward_cfg) if self.amp_moving_only else 1.0
+            r_amp = (
+                self.amp_weight
+                * heads.reward_cfg.dt
+                * gate
+                * self.amp.reward(torch.cat([amp_feat, amp_feat_next], dim=-1))
+            )
+            r = r + r_amp
+            amp_feat = amp_feat_next
+        term_vec = torch.stack([terms[k] for k in LOCO_REWARD_TERM_NAMES] + [r_amp], dim=0)
         obs_clean = heads.observation(s_next, a15, cmd, xi)
-        return s_next, r, term_vec, logits, obs_clean, timers
+        return s_next, r, term_vec, logits, obs_clean, timers, amp_feat
 
-    def __call__(self, s, a15, a15_prev, arm29, xi, cmd, timers=None, a15_exec=None):
-        return self._fn(s, a15, a15 if a15_exec is None else a15_exec, a15_prev, arm29, xi, cmd, timers)
+    def __call__(self, s, a15, a15_prev, arm29, xi, cmd, timers=None, a15_exec=None, amp_feat=None):
+        return self._fn(
+            s,
+            a15,
+            a15 if a15_exec is None else a15_exec,
+            a15_prev,
+            arm29,
+            xi,
+            cmd,
+            timers,
+            amp_feat,
+        )
 
 
-def loco_imagine(wm: LocoWorldModel, policy: LocoPolicy, start: StartBatch, horizon: int, obs_noise: bool = True, step_fn: LocoImagStep | None = None, switch_prob: float = 0.0, action_noise: float = 0.0) -> LocoRollout:
+def loco_imagine(
+    wm: LocoWorldModel,
+    policy: LocoPolicy,
+    start: StartBatch,
+    horizon: int,
+    obs_noise: bool = True,
+    step_fn: LocoImagStep | None = None,
+    switch_prob: float = 0.0,
+    action_noise: float = 0.0,
+) -> LocoRollout:
     device = start.state.device
     n = start.state.shape[0]
     heads = wm.heads
@@ -106,7 +157,12 @@ def loco_imagine(wm: LocoWorldModel, policy: LocoPolicy, start: StartBatch, hori
             return o + (torch.rand_like(o) * 2 - 1) * noise_half
         return o
 
-    hist = [add_noise(heads.observation(start.hist_states[i], start.hist_actions[i][:, ids], cmd, start.xi)) for i in range(start.hist_states.shape[0])]
+    hist = [
+        add_noise(
+            heads.observation(start.hist_states[i], start.hist_actions[i][:, ids], cmd, start.xi)
+        )
+        for i in range(start.hist_states.shape[0])
+    ]
     s = start.state
     arm29 = start.prev_action  # the arms' normalised targets, held over the horizon
     a_prev = start.prev_action[:, ids]
@@ -114,7 +170,8 @@ def loco_imagine(wm: LocoWorldModel, policy: LocoPolicy, start: StartBatch, hori
     states = [s]
     actions, rewards = [], []
     dhats, survivals = [torch.zeros(n, device=device)], [c]
-    term_sum = torch.zeros(len(LOCO_REWARD_TERM_NAMES), device=device)
+    term_sum = torch.zeros(len(LOCO_REWARD_TERM_NAMES) + 1, device=device)  # + the style reward
+    amp_feat = amp_features(s, heads.bodies(s), heads) if step_fn.amp is not None else None
     cmds = [start.goal]
     switch_at = torch.full((n,), horizon, device=device)  # never
     if switch_prob > 0.0:
@@ -133,13 +190,17 @@ def loco_imagine(wm: LocoWorldModel, policy: LocoPolicy, start: StartBatch, hori
         obs_flat = flatten_term_major(torch.stack(hist, 0))
         a = policy(obs_flat, cmd)
         a_exec = a + action_noise * torch.randn_like(a) if action_noise > 0.0 else a
-        s_next, r, term_vec, logits, obs_clean, timers = step_fn(s, a, a_prev, arm29, start.xi, cmd, timers, a_exec)
+        s_next, r, term_vec, logits, obs_clean, timers, amp_feat = step_fn(
+            s, a, a_prev, arm29, start.xi, cmd, timers, a_exec, amp_feat
+        )
         d = torch.sigmoid(logits)
         c = c * (1.0 - d)
         term_sum += term_vec.detach().mean(-1)
         hist = hist[1:] + [add_noise(obs_clean)]
         if has_clock:
-            cmd = torch.cat([cmd[..., :7], advance_clock(cmd[..., 7:], rcfg.dt, rcfg.gait_period)], dim=-1)
+            cmd = torch.cat(
+                [cmd[..., :7], advance_clock(cmd[..., 7:], rcfg.dt, rcfg.gait_period)], dim=-1
+            )
         cmds.append(cmd if timers is None else torch.cat([cmd, timers], dim=-1))
         a_prev = a
         s = s_next
@@ -156,5 +217,8 @@ def loco_imagine(wm: LocoWorldModel, policy: LocoPolicy, start: StartBatch, hori
         dhat=torch.stack(dhats),
         survival=torch.stack(survivals),
         cmd=torch.stack(cmds),
-        reward_terms={k: float(v / horizon) for k, v in zip(LOCO_REWARD_TERM_NAMES, term_sum.tolist())},
+        reward_terms={
+            k: float(v / horizon)
+            for k, v in zip(LOCO_REWARD_TERM_NAMES + ("amp",), term_sum.tolist())
+        },
     )
