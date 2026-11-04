@@ -32,7 +32,9 @@ from supermimic.world_model.world_model import WorldModel
 class Trainer:
     def __init__(self, cfg: TrainConfig):
         self.cfg = cfg
-        cfg.policy.goal_dim = cfg.env.future_frames * 68 + anchor_obs_dim(cfg.env.anchor_obs, cfg.env.anchor_ori_only)
+        cfg.policy.goal_dim = cfg.env.future_frames * 68 + anchor_obs_dim(
+            cfg.env.anchor_obs, cfg.env.anchor_ori_only
+        )
         cfg.policy_trainer.anchor_obs = cfg.env.anchor_obs
         cfg.policy_trainer.anchor_ori_only = cfg.env.anchor_ori_only
         self.rank, local_rank, self.world = init_distributed()
@@ -181,40 +183,92 @@ class Trainer:
         )
 
     def load_weights(self, path: Path) -> None:
-        """Fine-tune on a changed robot: weights, Adam moments and the return-based sampler state come from the
-        checkpoint, iteration and learning-rate schedule start fresh. A wider simulation context (new xi entries
-        appended at the end of xi) gets zero input columns, and zero Adam moments, in the first layer of the dynamics
-        network and the critic."""
+        """Fine-tune on a changed robot or goal: weights, Adam moments and the return-based sampler state come from
+        the checkpoint, iteration and learning-rate schedule start fresh. New inputs get zero columns, and zero Adam
+        moments, in the first layer that reads them, so the loaded networks start out computing what they did:
+        new xi entries (appended at the end of xi) in the dynamics network and the critic, new goal entries (the
+        anchor observation, appended at the end of the goal) in the motion encoder and the critic."""
         ck = torch.load(path, map_location=self.device, weights_only=False)
-        wm_sd, critic_sd = ck["wm"], ck["critic"]
+        wm_sd, policy_sd, critic_sd = ck["wm"], ck["policy"], ck["critic"]
+        enc_key = "encoders.motion.mlp.net.0.weight"
         new_xi = self.wm.dynamics.mlp.net[0].in_features - (71 + 29)
         old_xi = wm_sd["dynamics.mlp.net.0.weight"].shape[1] - (71 + 29)
-        goal_dim = self.cfg.policy.goal_dim
-        widen = lambda w, start: torch.cat(
-            [
-                w[:, : start + old_xi],
-                w.new_zeros(w.shape[0], new_xi - old_xi),
-                w[:, start + old_xi :],
-            ],
-            dim=1,
-        )
-        if old_xi != new_xi:
-            wm_sd["dynamics.mlp.net.0.weight"] = widen(wm_sd["dynamics.mlp.net.0.weight"], 71 + 29)
-            critic_sd["mlp.net.0.weight"] = widen(critic_sd["mlp.net.0.weight"], 71 + goal_dim)
+        new_goal = self.cfg.policy.goal_dim
+        old_goal = policy_sd[enc_key].shape[1]
+
+        def insert_zeros(w: torch.Tensor, at: int, n: int) -> torch.Tensor:
+            return torch.cat([w[:, :at], w.new_zeros(w.shape[0], n), w[:, at:]], dim=1)
+
+        # (state dict, key, optimizer state, parameter, insert position, columns); the critic reads
+        # [feat 71, goal, xi, root error 4], so its xi columns go in before its goal columns move
+        widenings = []
+        if new_xi != old_xi:
+            widenings.append(
+                (
+                    wm_sd,
+                    "dynamics.mlp.net.0.weight",
+                    ck["wm_opt"],
+                    self.wm.dynamics.mlp.net[0].weight,
+                    71 + 29 + old_xi,
+                    new_xi - old_xi,
+                )
+            )
+            widenings.append(
+                (
+                    critic_sd,
+                    "mlp.net.0.weight",
+                    ck["critic_opt"],
+                    self.critic.mlp.net[0].weight,
+                    71 + old_goal + old_xi,
+                    new_xi - old_xi,
+                )
+            )
+        if new_goal != old_goal:
+            widenings.append(
+                (
+                    policy_sd,
+                    enc_key,
+                    ck["policy_opt"],
+                    self.policy.encoders["motion"].mlp.net[0].weight,
+                    old_goal,
+                    new_goal - old_goal,
+                )
+            )
+            widenings.append(
+                (
+                    critic_sd,
+                    "mlp.net.0.weight",
+                    ck["critic_opt"],
+                    self.critic.mlp.net[0].weight,
+                    71 + old_goal,
+                    new_goal - old_goal,
+                )
+            )
+            # per-feature goal scales are buffers built from the config; the new layout's come from the new networks
+            policy_sd["encoders.motion.scale"] = self.policy.encoders["motion"].scale
+            critic_sd["goal_scale"] = self.critic.goal_scale
+        params_of = {
+            id(ck["wm_opt"]): list(self.wm.parameters()),
+            id(ck["policy_opt"]): list(self.policy.parameters()),
+            id(ck["critic_opt"]): list(self.critic.parameters()),
+        }
+        for sd, key, opt_sd, param, at, n in widenings:
+            sd[key] = insert_zeros(sd[key], at, n)
             # Adam keeps one exp_avg / exp_avg_sq per parameter, indexed in parameters() order
-            for opt_sd, params, first, start in (
-                (ck["wm_opt"], list(self.wm.parameters()), self.wm.dynamics.mlp.net[0].weight, 71 + 29),
-                (ck["critic_opt"], list(self.critic.parameters()), self.critic.mlp.net[0].weight, 71 + goal_dim),
-            ):
-                idx = next(i for i, q in enumerate(params) if q is first)
-                st = opt_sd["state"][idx]
-                for k in ("exp_avg", "exp_avg_sq"):
-                    st[k] = widen(st[k], start)
+            idx = next(i for i, q in enumerate(params_of[id(opt_sd)]) if q is param)
+            st = opt_sd["state"][idx]
+            for k in ("exp_avg", "exp_avg_sq"):
+                st[k] = insert_zeros(st[k], at, n)
+        if new_xi != old_xi:
             print(
                 f"[INFO] fine-tune: xi widened {old_xi} -> {new_xi} (zero columns and zero Adam moments for the new entries)"
             )
+        if new_goal != old_goal:
+            print(
+                f"[INFO] fine-tune: goal widened {old_goal} -> {new_goal} (zero columns and zero Adam moments for the new entries)"
+            )
         self.wm.load_state_dict(wm_sd)
-        self.policy.load_state_dict(ck["policy"])
+        self.policy.load_state_dict(policy_sd)
         self.critic.load_state_dict(critic_sd)
         self.wm_trainer.opt.load_state_dict(ck["wm_opt"])
         self.policy_trainer.opt.load_state_dict(ck["policy_opt"])
@@ -302,7 +356,11 @@ class Trainer:
                     timers["wm"] += time.perf_counter() - t0
                     t0 = time.perf_counter()
                     m_pi = {}
-                    for _ in range(sch.policy_updates_per_wm_update if self.iteration >= sch.wm_only_iterations else 0):
+                    for _ in range(
+                        sch.policy_updates_per_wm_update
+                        if self.iteration >= sch.wm_only_iterations
+                        else 0
+                    ):
                         m_pi = self.policy_trainer.update(
                             self.buffer, train_actor=self.iteration >= sch.policy_freeze_iterations
                         )
